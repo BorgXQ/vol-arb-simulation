@@ -4,8 +4,6 @@ An end-to-end quantitative finance project that simulates and visualizes a **vol
 
 Built with **Python + Streamlit**, this project demonstrates how a trader can exploit discrepancies between **market implied volatility** and **model-implied volatility** through dynamic hedging.
 
----
-
 ## Overview
 
 This project simulates the full pipeline of a volatility trading workflow:
@@ -38,8 +36,6 @@ This project simulates the full pipeline of a volatility trading workflow:
    * Tracks PnL and hedge dynamics over time
    * Computes performance metrics (Sharpe, Sortino, MDD, Calmar)
 
----
-
 ## Streamlit Dashboard
 
 The interactive app allows users to explore how model assumptions impact trading outcomes.
@@ -54,8 +50,6 @@ The interactive app allows users to explore how model assumptions impact trading
 * Market noise level
 * Time to expiry
 * Run / Reset controls
-
----
 
 ### Main Dashboard
 
@@ -99,8 +93,6 @@ The interactive app allows users to explore how model assumptions impact trading
 * Calibration vs direct simulation
 * Path dependency in PnL
 
----
-
 ## 📁 Project Structure
 
 ```
@@ -117,8 +109,6 @@ The interactive app allows users to explore how model assumptions impact trading
 └── 📖 README.md              # This file
 ```
 
----
-
 ## Installation
 
 ```bash
@@ -128,16 +118,11 @@ cd volatility-arbitrage-dashboard
 pip install -r requirements.txt
 ```
 
----
-
 ## Run the App
 
 ```bash
 streamlit run app.py
 ```
-
----
-
 ## Notes
 
 * This project is **educational and demonstrative**, not a production trading system
@@ -147,8 +132,6 @@ streamlit run app.py
   * small return magnitudes
   * idealized hedging assumptions
 
----
-
 ## Future Improvements
 
 * Introduce transaction costs and bid-ask spreads
@@ -156,8 +139,6 @@ streamlit run app.py
 * More robust calibration techniques
 * Alternative models (SABR, local volatility)
 * Parallelization for faster execution
-
----
 
 ## License
 
