@@ -1,7 +1,3 @@
-Here’s a clean, professional `README.md` tailored for your project (quant-focused + GitHub showcase ready):
-
----
-
 # Volatility Arbitrage Simulation Dashboard
 
 An end-to-end quantitative finance project that simulates and visualizes a **volatility arbitrage strategy** using stochastic volatility and jump diffusion models.
