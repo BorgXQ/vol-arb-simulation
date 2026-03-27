@@ -4,94 +4,27 @@ An end-to-end quantitative finance project that simulates and visualizes a **vol
 
 Built with **Python + Streamlit**, this project demonstrates how a trader can exploit discrepancies between **market implied volatility** and **model-implied volatility** through dynamic hedging.
 
-## Overview
+Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)**.
 
-This project simulates the full pipeline of a volatility trading workflow:
+## Features
 
-1. **Underlying Market Simulation**
-
-   * Generates asset price paths using a **Bates model** (Heston + jump diffusion)
-
-2. **Synthetic Options Market**
-
-   * Prices options across strikes and time using a (possibly different) market model
-   * Computes **market implied volatility (IV)** via Black-Scholes inversion
-
-3. **Trader Model**
-
-   * Calibrates a **Heston model** to a subset of market options
-   * Produces **theoretical prices and implied volatility**
-
-4. **Volatility Arbitrage Strategy**
-
-   * Identifies the most mispriced option (IV difference)
-   * Takes a position (long/short)
-   * Applies:
-
-     * **Gamma-Vega hedging (options)**
-     * **Delta hedging (underlying)**
-
-5. **Backtesting & Diagnostics**
-
-   * Tracks PnL and hedge dynamics over time
-   * Computes performance metrics (Sharpe, Sortino, MDD, Calmar)
-
-## Streamlit Dashboard
-
-The interactive app allows users to explore how model assumptions impact trading outcomes.
-
-### Sidebar Controls
-
-* Random seed (market scenario generator)
-* Market model parameters:
-
-  * Heston: $\kappa$, $\theta$, $\xi$, $\rho$
-  * Jump diffusion: $\lambda$, $\mu_j$, $\sigma_j$
-* Market noise level
-* Time to expiry
-* Run / Reset controls
-
-### Main Dashboard
-
-#### **Row 1 — Market Simulation**
-
-* Dual-axis plot:
-
-  * Asset price
-  * Instantaneous volatility
-* Visualizes the simulated “true” market path
-
-#### **Row 2 — Volatility Surface Diagnostics**
-
-* **Left:** Market IV smile vs trader model IV (t = 0)
-* **Right:** IV mispricing across contracts
-
-  * Highlights selected **target option**
-
-#### **Row 3 — Strategy Performance**
-
-* Hedge weights over time
-* Market vs theoretical price (target)
-* Market vs theoretical IV (target)
-* Cumulative returns with metrics:
-
-  * Sharpe Ratio
-  * Sortino Ratio
-  * Maximum Drawdown
-  * Calmar Ratio
+- **Underlying Market Simulation**: Bates model (Heston + jump diffusion) for asset price path generation
+- **Synthetic Options Market**: Variable Bates model; Black-Scholes inversion for market implied volatility (IV)
+- **Trader Model**: Heston model calibration (via Carr-Madan FFT) for theoretical option pricing and IV
+- **Volatility Arbitrage Strategy**: Gamma-Vega hedging (options) and Delta hedging (underlying) for most mispriced option
+- **Diagnostics**: PnL & hedge dynamics tracking; performance metrics (Sharpe, Sortino, MDD, Calmar) computation
 
 ## Key Concepts Demonstrated
 
-* Volatility vs price-based trading
-* Model risk (Bates vs Heston mismatch)
-* Implied volatility surfaces & skew
-* Greeks-based hedging:
-
-  * Delta
-  * Gamma
-  * Vega
-* Calibration vs direct simulation
-* Path dependency in PnL
+- Volatility vs price-based trading
+- Model risk (Bates vs Heston mismatch)
+- Implied volatility surfaces & skew
+- Greeks-based hedging:
+  - Delta
+  - Gamma
+  - Vega
+- Calibration vs direct simulation
+- Path dependency in PnL
 
 ## 📁 Project Structure
 
@@ -111,6 +44,8 @@ The interactive app allows users to explore how model assumptions impact trading
 
 ## Installation
 
+This project was developed and tested with **Python 3.11.9**.
+
 ```bash
 git clone https://github.com/your-username/vol-arb-simulation.git
 cd volatility-arbitrage-dashboard
@@ -125,20 +60,17 @@ streamlit run app.py
 ```
 ## Notes
 
-* This project is **educational and demonstrative**, not a production trading system
-* No transaction costs or slippage are modeled
-* Performance metrics may appear inflated due to:
-
-  * small return magnitudes
-  * idealized hedging assumptions
+- This project is **educational and demonstrative**, not a production trading system
+- No transaction costs or slippage are modeled
+- Performance metrics may appear inflated due to small return magnitudes and idealized hedging assumptions
 
 ## Future Improvements
 
-* Introduce transaction costs and bid-ask spreads
-* Multi-path simulation (Monte Carlo backtesting)
-* More robust calibration techniques
-* Alternative models (SABR, local volatility)
-* Parallelization for faster execution
+- Introduce transaction costs and bid-ask spreads
+- Multi-path simulation (Monte Carlo backtesting)
+- More robust calibration techniques
+- Alternative models (SABR, local volatility)
+- Parallelization for faster execution
 
 ## License
 
