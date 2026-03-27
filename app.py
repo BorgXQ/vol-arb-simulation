@@ -508,7 +508,8 @@ def main():
         st.slider("σⱼ (jump std)", min_value=0.0, max_value=0.30, step=0.005, key="sigmaj", format="%.3f", disabled=not st.session_state["jump_on"])
         st.subheader("Strategy Window")
         st.slider("Time to expiry (trading days)", min_value=20, max_value=60, step=1, key="use_last_n")
-        st.caption("CAUTION: Analysis on a 60-day window takes up to ~11 minutes. It is recommended to clone the repository and run locally for faster execution.")
+        st.caption("CAUTION: Analysis on a 60-day window takes up to ~11 minutes.")
+        st.caption("It is recommended to clone the repository and run locally for faster execution.")
         st.button("Reset to defaults", use_container_width=True, on_click=reset_defaults)
         run_clicked = st.button("Run analysis", type="primary", use_container_width=True)
 
