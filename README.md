@@ -1,10 +1,10 @@
 # Volatility Arbitrage Simulation Dashboard
 
-An end-to-end quantitative finance project that simulates and visualizes a **volatility arbitrage strategy** using stochastic volatility and jump diffusion models.
+An end-to-end quantitative finance project that simulates and visualizes a **volatility arbitrage strategy** using stochastic volatility and jump diffusion models. Built with **Python + Streamlit**, this project demonstrates how a trader can exploit discrepancies between **market implied volatility** and **model-implied volatility** through dynamic hedging.
 
-Built with **Python + Streamlit**, this project demonstrates how a trader can exploit discrepancies between **market implied volatility** and **model-implied volatility** through dynamic hedging.
+Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)**
 
-Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)** (NOTE: The analysis for a 60-day window takes ~11 minutes to run; it is highly recommended to clone the repository and run it locally instead).
+(NOTE: The analysis for a 60-day window takes ~11 minutes to run; it is highly recommended to clone the repository and run it locally instead).
 
 ## Features
 
