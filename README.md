@@ -4,7 +4,7 @@ An end-to-end quantitative finance project that simulates and visualizes a **vol
 
 Built with **Python + Streamlit**, this project demonstrates how a trader can exploit discrepancies between **market implied volatility** and **model-implied volatility** through dynamic hedging.
 
-Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)**.
+Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)** (NOTE: The analysis for a 60-day window takes ~11 minutes to run; it is highly recommended to clone the repository and run it locally instead).
 
 ## Features
 
