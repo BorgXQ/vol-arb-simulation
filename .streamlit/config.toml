@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#615fff"              # Slider color
+backgroundColor = "#0e172b"           # Main background
+secondaryBackgroundColor = "#1c293d"  # Sidebar background
+textColor = "#e2e8f0"                 # Text color
+font = "'Space Grotesk':https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap, sans-serif"
