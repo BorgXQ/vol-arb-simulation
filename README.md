@@ -4,7 +4,7 @@ An end-to-end quantitative finance project that simulates and visualizes a volat
 
 Check out the **[demo](https://vol-arb-simulation-borgxq.streamlit.app/)**
 
-(NOTE: The analysis for a 60-day window takes ~11 minutes to run; it is highly recommended to clone the repository and run it locally instead).
+(NOTE: The analysis for a 60-day window takes ~11 minutes to run on Streamlit; it is highly recommended to clone the repository and run it locally instead).
 
 ## Features
 
