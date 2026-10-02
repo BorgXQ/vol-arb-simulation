@@ -17,6 +17,7 @@ from src.utils import (  # noqa: E402
     generate_market_option_prices_across_time,
     append_market_iv,
     strip_state_df,
+    strategy_reporting_window,
 )
 from src.vol_arb import (  # noqa: E402
     add_option_id_column,
@@ -126,7 +127,8 @@ def run_analysis_cached(
         hedge_mode=hedge_mode,
     )
 
-    state_df_reduced = strip_state_df(state_df).iloc[: use_last_n - (exit_days_before_expiry + 1)].copy()
+    reported_state = strategy_reporting_window(state_df)
+    state_df_reduced = strip_state_df(reported_state)
 
     # Build t=0 diagnostics for row 2.
     full_slice_t0 = add_option_id_column(
@@ -159,6 +161,11 @@ def run_analysis_cached(
         "t_grid": t_grid,
         "options_market_df": options_market_df,
         "state_df_reduced": state_df_reduced,
+        "cash_account": reported_state[[
+            "T", "account_status", "cash_balance", "holdings_value", "equity",
+            "trade_cashflow", "trading_pnl_incremental", "financing_incremental",
+            "financing_cumulative", "pnl_incremental", "pnl_cumulative",
+        ]].copy(),
         "hedge_diagnostics": state_df[[
             "T", "hedge_mode", "net_delta", "net_gamma", "net_variance_sensitivity",
             "hedge_rank", "hedge_condition", "hedge_gross_options", "hedge_residual", "greek_error_ratio",
@@ -610,6 +617,13 @@ def main():
             priced_universe_t0[display_cols].sort_values(["Type", "Strike"]).reset_index(drop=True),
             use_container_width=True,
         )
+
+    with st.expander("Cash account and financing"):
+        st.caption("Zero initial capital; purchases are funded by cash or borrowing. "
+                   "Cash earns or pays the previous day's pricing rate, with continuous compounding. "
+                   "P&L includes financing and liquidation on the exit day; cash is frozen afterwards. "
+                   "Initial gross exposure is a normalization measure, not deposited capital.")
+        st.dataframe(result["cash_account"], use_container_width=True)
 
     with st.expander("Show reduced state dataframe"):
         st.dataframe(state_df_reduced, use_container_width=True)

@@ -560,41 +560,78 @@ def compute_initial_gross_exposure(priced_universe_df, option_weights, w_underly
     return gross_options + gross_underlying
 
 
-def update_pnl_from_previous_row(state_df, options_prev, options_curr, t_idx, prev_t_idx):
+ACCOUNT_COLUMNS = (
+    "cash_balance", "holdings_value", "equity", "trade_cashflow",
+    "financing_incremental", "financing_cumulative", "trading_pnl_incremental",
+)
+
+
+def settle_cash_account(state_df, options_curr, t_idx, options_prev=None, prev_t_idx=None):
+    """Settle current weights at current quotes, after accruing prior cash.
+
+    Zero initial capital; no external deposits, transaction costs or dividends.
+    Both borrowing and lending use the previous slice's continuously compounded
+    r over the decrease in T (the simulation's year convention). Entry and
+    rebalancing exchange cash for holdings without creating equity. After exit,
+    the account is frozen; proceeds are no longer invested by this strategy.
     """
-    Compute incremental and cumulative PnL from the previous timestep's positions.
+    def positions(index):
+        if index is None:
+            return {}, 0.0
+        weights = {col[2:]: float(state_df.loc[index, col]) for col in state_df.columns
+                   if col.startswith("w_") and col != "w_underlying"}
+        stock = float(state_df.loc[index, "w_underlying"])
+        if not np.isfinite([*weights.values(), stock]).all():
+            raise ValueError("Accounting requires finite positions.")
+        return {oid: w for oid, w in weights.items() if w != 0}, stock
 
-    PnL is the mark-to-market change in value of holdings carried from prev_t_idx.
+    def value(weights, stock, quotes, spot):
+        prices = quotes.set_index("Option_ID")["Market_Price"]
+        if prices.index.has_duplicates:
+            raise ValueError("Accounting requires unique option quotes per timestep.")
+        missing = set(weights) - set(prices.index)
+        if missing:
+            raise ValueError(f"Missing market quotes for held contracts: {sorted(missing)}")
+        marks = prices.reindex(list(weights)).to_numpy(float)
+        if not np.isfinite(marks).all() or not np.isfinite(spot) or spot <= 0:
+            raise ValueError("Accounting requires finite marks and a positive spot.")
+        return float(np.dot(list(weights.values()), marks) + stock * spot)
 
-    Parameters
-    ----------
-    state_df : pd.DataFrame
-    options_prev : pd.DataFrame
-        Options data at the previous timestep.
-    options_curr : pd.DataFrame
-        Options data at the current timestep.
-    t_idx : int
-        Current time index.
-    prev_t_idx : int
-        Previous time index.
-    """
-    prev_prices = options_prev.set_index("Option_ID")["Market_Price"]
-    curr_prices = options_curr.set_index("Option_ID")["Market_Price"]
-    common_ids = prev_prices.index.intersection(curr_prices.index)
+    old_weights, old_stock = positions(prev_t_idx)
+    new_weights, new_stock = positions(t_idx)
+    spot = float(state_df.loc[t_idx, "S_t"])
+    holdings = value(new_weights, new_stock, options_curr, spot)
+    old_marked = value(old_weights, old_stock, options_curr, spot)
+    previous_cash = previous_equity = previous_holdings = interest = financing_total = 0.0
+    if prev_t_idx is not None:
+        previous_cash = float(state_df.loc[prev_t_idx, "cash_balance"])
+        previous_equity = float(state_df.loc[prev_t_idx, "equity"])
+        financing_total = float(state_df.loc[prev_t_idx, "financing_cumulative"])
+        previous_holdings = value(old_weights, old_stock, options_prev,
+                                  float(state_df.loc[prev_t_idx, "S_t"]))
+        elapsed = float(state_df.loc[prev_t_idx, "T"] - state_df.loc[t_idx, "T"])
+        if not np.isfinite(elapsed) or elapsed <= 0:
+            raise ValueError("Accounting requires strictly decreasing maturities.")
+        if state_df.loc[prev_t_idx, "account_status"] == "active":
+            rates = options_prev["r"].to_numpy(float)
+            if not np.isfinite(rates).all() or not np.all(rates == rates[0]):
+                raise ValueError("Accounting requires a single finite funding rate per timestep.")
+            interest = previous_cash * np.expm1(float(rates[0]) * elapsed)
 
-    pnl = 0.0
-    for oid in common_ids:
-        w_prev = float(state_df.loc[prev_t_idx, f"w_{oid}"])
-        pnl += w_prev * (float(curr_prices.loc[oid]) - float(prev_prices.loc[oid]))
-
-    S_prev = float(state_df.loc[prev_t_idx, "S_t"])
-    S_curr = float(state_df.loc[t_idx, "S_t"])
-    w_u_prev = float(state_df.loc[prev_t_idx, "w_underlying"])
-
-    pnl += w_u_prev * (S_curr - S_prev)
-
-    state_df.loc[t_idx, "pnl_incremental"] = pnl
-    state_df.loc[t_idx, "pnl_cumulative"] = float(state_df.loc[prev_t_idx, "pnl_cumulative"]) + pnl
+    # Selling old holdings and buying new ones is equivalent to trading changes.
+    trade_cashflow = old_marked - holdings
+    cash = previous_cash + interest + trade_cashflow
+    equity = cash + holdings
+    trading_pnl = old_marked - previous_holdings
+    if not np.isfinite([cash, equity, interest, trading_pnl]).all():
+        raise ValueError("Nonfinite cash-account result.")
+    values = dict(cash_balance=cash, holdings_value=holdings, equity=equity,
+                  trade_cashflow=trade_cashflow, financing_incremental=interest,
+                  financing_cumulative=financing_total + interest,
+                  trading_pnl_incremental=trading_pnl,
+                  pnl_incremental=equity - previous_equity, pnl_cumulative=equity)
+    for name, amount in values.items():
+        state_df.loc[t_idx, name] = amount
 
 
 # ==============================================================================
@@ -620,7 +657,9 @@ def run_vol_arb_strategy(
     - t=0 : calibrate model, price universe, select target once, hedge.
     - t>=1 : target is fixed; universe is rebuilt each period; recalibrate,
              reprice, and rehedge.
-    - Exit  : zero positions when T <= exit_days_before_expiry * dt.
+    - Cash starts at zero; trades are self-financing and cash accrues at prior r.
+    - Exit: liquidate at current marks when T <= exit_days_before_expiry * dt;
+            include that holding period's P&L and financing, then freeze cash.
 
     Parameters
     ----------
@@ -666,6 +705,9 @@ def run_vol_arb_strategy(
     time_indices = sorted(df["t_index"].unique())
     state_df = initialize_strategy_state_df(df).copy()
     state_df["hedge_mode"] = hedge_mode
+    state_df["account_status"] = "pending"
+    for name in ACCOUNT_COLUMNS:
+        state_df[name] = 0.0
     for name in ("hedge_rank", "hedge_condition", "hedge_gross_options", "hedge_residual", "greek_error_ratio"):
         state_df[name] = np.nan
 
@@ -677,19 +719,26 @@ def run_vol_arb_strategy(
         full_slice = df[df["t_index"] == t_idx].copy().reset_index(drop=True)
         write_static_state(state_df, t_idx, full_slice)
 
-        # PnL from previous holdings into current time
-        if i > 0:
-            prev_t = time_indices[i - 1]
-            prev_slice = df[df["t_index"] == prev_t].copy()
-            update_pnl_from_previous_row(state_df, prev_slice, full_slice, t_idx, prev_t)
+        prev_t = time_indices[i - 1] if i > 0 else None
+        prev_slice = df[df["t_index"] == prev_t].copy() if i > 0 else None
+        # Record current marks on exit as well as on active trading days.
+        for _, quote in full_slice.iterrows():
+            oid = quote["Option_ID"]
+            state_df.loc[t_idx, f"mkt_price_{oid}"] = float(quote["Market_Price"])
+            state_df.loc[t_idx, f"mkt_iv_{oid}"] = float(quote["Market_IV"])
 
-        # Exit rule near expiry
+        # Close at current marks, including the final holding-period P&L and interest.
         T_t = float(full_slice["T"].iloc[0])
         if T_t <= exit_days_before_expiry * dt:
             zero_current_positions(state_df, t_idx)
             state_df.loc[t_idx, "target_option_id"] = target_option_id
-            state_df.loc[t_idx, "target_position"] = float(target_position) if target_position is not None else 0.0
+            state_df.loc[t_idx, "target_position"] = 0.0
+            was_active = prev_t is not None and state_df.loc[prev_t, "account_status"] == "active"
+            state_df.loc[t_idx, "account_status"] = "exited" if was_active else "closed"
+            settle_cash_account(state_df, full_slice, t_idx, prev_slice, prev_t)
             continue
+
+        state_df.loc[t_idx, "account_status"] = "active"
 
         # Build current tradable universe
         universe_df = select_otm_universe(full_slice, n_each_side=n_each_side)
@@ -761,5 +810,7 @@ def run_vol_arb_strategy(
             target_option_id=target_option_id,
             target_position=target_position,
         )
+
+        settle_cash_account(state_df, full_slice, t_idx, prev_slice, prev_t)
 
     return state_df, initial_gross_exposure

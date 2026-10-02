@@ -503,6 +503,13 @@ def append_market_iv(options_df):
 # STATE DATAFRAME DIAGNOSTICS
 # ==============================================================================
 
+def strategy_reporting_window(state_df):
+    """Keep active observations and the liquidation row, excluding idle cash days."""
+    terminal = np.flatnonzero(state_df["account_status"].isin(["exited", "closed"]).to_numpy())
+    stop = int(terminal[0]) + 1 if len(terminal) else len(state_df)
+    return state_df.iloc[:stop].copy()
+
+
 def strip_state_df(state_df):
     """
     Reduce the full strategy state DataFrame to a compact diagnostic view.
@@ -569,6 +576,11 @@ def strip_state_df(state_df):
         "pnl_incremental",
         "pnl_cumulative",
     ]
+
+    core_cols += [col for col in (
+        "account_status", "cash_balance", "holdings_value", "equity", "trade_cashflow",
+        "financing_incremental", "financing_cumulative", "trading_pnl_incremental",
+    ) if col in df.columns]
 
     reduced_df = pd.concat(
         [df[core_cols], target_iv_df, df[weight_cols]],
