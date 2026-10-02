@@ -208,6 +208,11 @@ def generate_market_option_prices_across_time(
     Generate synthetic market call and put prices across time for a fixed
     strike universe.
 
+    Positive strikes are listed every $2, spanning at least 30% (or $6,
+    whichever is larger) on either side of the first spot in the selected
+    window, rounded outward to the grid. The universe stays fixed thereafter;
+    future spot prices do not determine which contracts are available.
+
     The market model is a perturbed version of the true parameters; at each
     timestep the current state is:
 
@@ -251,13 +256,14 @@ def generate_market_option_prices_across_time(
 
     n_steps = len(S_window)
 
-    # Strike universe based on the price range in the window
-    S_min = np.min(S_window)
-    S_max = np.max(S_window)
-
-    K_min = int(np.floor(S_min - 5.0))
-    K_max = int(np.ceil(S_max + 5.0))
-    strikes = np.arange(K_min, K_max + 1, 2, dtype=float)
+    # List contracts using only the spot known at window inception. Keep a
+    # broad fixed range for hedging, without anticipating future price moves.
+    initial_spot = float(S_window[0])
+    strike_step = 2.0
+    half_width = max(0.30 * initial_spot, 3 * strike_step)
+    K_min = max(strike_step, np.floor((initial_spot - half_width) / strike_step) * strike_step)
+    K_max = np.ceil((initial_spot + half_width) / strike_step) * strike_step
+    strikes = np.arange(K_min, K_max + strike_step, strike_step, dtype=float)
 
     # Generate prices over time
     rows = []
