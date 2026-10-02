@@ -47,6 +47,7 @@ DEFAULTS = {
     "sigmaj": 0.135,
     "noise_scale": 0.0,
     "exit_days_before_expiry": 10,
+    "hedge_mode": "gamma_delta_variance",
     "pricing_N": DEFAULT_FFT_N,
     "alpha": DEFAULT_FFT_ALPHA,
     "eta": DEFAULT_FFT_ETA,
@@ -79,6 +80,7 @@ def run_analysis_cached(
     n_each_side: int,
     dt: float,
     r: float,
+    hedge_mode: str = "gamma_delta_variance",
 ):
     if noise_scale != 0:
         raise ValueError("Quote noise is disabled for the baseline; noise_scale must be 0.")
@@ -121,6 +123,7 @@ def run_analysis_cached(
         n_each_side=n_each_side,
         dt=dt,
         exit_days_before_expiry=exit_days_before_expiry,
+        hedge_mode=hedge_mode,
     )
 
     state_df_reduced = strip_state_df(state_df).iloc[: use_last_n - (exit_days_before_expiry + 1)].copy()
@@ -156,6 +159,10 @@ def run_analysis_cached(
         "t_grid": t_grid,
         "options_market_df": options_market_df,
         "state_df_reduced": state_df_reduced,
+        "hedge_diagnostics": state_df[[
+            "T", "hedge_mode", "net_delta", "net_gamma", "net_variance_sensitivity",
+            "hedge_rank", "hedge_condition", "hedge_gross_options", "hedge_residual", "greek_error_ratio",
+        ]].copy(),
         "initial_gross_exposure": float(initial_gross_exposure),
         "full_slice_t0": full_slice_t0,
         "priced_universe_t0": priced_universe_t0,
@@ -512,6 +519,9 @@ def main():
         st.slider("μⱼ (jump mean)", min_value=-0.30, max_value=0.0, step=0.005, key="muj", format="%.3f", disabled=not st.session_state["jump_on"])
         st.slider("σⱼ (jump std)", min_value=0.0, max_value=0.30, step=0.005, key="sigmaj", format="%.3f", disabled=not st.session_state["jump_on"])
         st.subheader("Strategy Window")
+        st.selectbox("Hedge constraints", ["gamma_delta_variance", "gamma_delta"],
+                     format_func=lambda mode: {"gamma_delta_variance": "Gamma–delta–variance",
+                                               "gamma_delta": "Gamma–delta"}[mode], key="hedge_mode")
         st.slider("Time to expiry (trading days)", min_value=20, max_value=60, step=1, key="use_last_n")
         st.caption("Analysis time increases with the selected window length.")
         st.caption("It is recommended to clone the repository and run locally for faster execution.")
@@ -537,6 +547,7 @@ def main():
                 sigmaj=st.session_state["sigmaj"],
                 noise_scale=DEFAULTS["noise_scale"],
                 exit_days_before_expiry=st.session_state["exit_days_before_expiry"],
+                hedge_mode=st.session_state["hedge_mode"],
                 pricing_N=DEFAULTS["pricing_N"],
                 alpha=DEFAULTS["alpha"],
                 eta=DEFAULTS["eta"],
@@ -553,6 +564,12 @@ def main():
     v_path = result["v_path"]
     priced_universe_t0 = result["priced_universe_t0"]
     state_df_reduced = result["state_df_reduced"]
+    with st.expander("Hedge validation"):
+        st.caption("Variance sensitivity is dV/dv₀. Gamma–delta mode leaves this risk unconstrained. "
+                   "Greek error ratio ≤ 1 passes bump and resolution checks; residuals use scaled risk units. "
+                   "Condition numbers describe the scaled matrix before singular-value truncation. "
+                   "Gross option hedges are measured per unit target. Blank diagnostics indicate no hedge was opened.")
+        st.dataframe(result["hedge_diagnostics"], use_container_width=True)
     initial_gross_exposure = result["initial_gross_exposure"]
     target_row_t0 = result["target_row_t0"]
     target_option_id_t0 = result["target_option_id_t0"]

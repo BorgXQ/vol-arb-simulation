@@ -88,7 +88,7 @@ def initialize_strategy_state_df(options_df):
         "t_index", "S_t", "T",
         "target_option_id", "target_position",
         "kappa_trader", "theta_trader", "xi_trader", "rho_trader", "v0_trader",
-        "net_delta", "net_gamma", "net_vega",
+        "net_delta", "net_gamma", "net_vega", "net_variance_sensitivity",
         "w_underlying",
         "pnl_incremental", "pnl_cumulative",
     ]
@@ -114,7 +114,7 @@ def initialize_strategy_state_df(options_df):
     for col in [
         "S_t", "T",
         "kappa_trader", "theta_trader", "xi_trader", "rho_trader", "v0_trader",
-        "net_delta", "net_gamma", "net_vega",
+        "net_delta", "net_gamma", "net_vega", "net_variance_sensitivity",
         "w_underlying", "pnl_incremental", "pnl_cumulative"
     ]:
         state_df[col] = 0.0
@@ -222,34 +222,11 @@ def price_slice_with_heston_and_greeks(
     eps_S_rel=0.01,
     eps_v_rel=0.05,
 ):
-    """
-    Price the current options slice and compute Delta, Gamma, and Vega via
-    central finite differences.
+    """Price options and validate Richardson Greeks against smaller bumps and 2N.
 
-    Parameters
-    ----------
-    options_slice : pd.DataFrame
-        Options to price; must contain Strike, Type, T, r.
-    S0 : float
-        Current underlying price.
-    params : array-like
-        Heston parameters (kappa_v, theta_v, xi_v, rho, v0).
-    N : int, optional
-        FFT grid size (default 16384).
-    alpha : float, optional
-        Carr-Madan damping parameter (default 1.5).
-    eta : float, optional
-        Frequency grid spacing (default 0.25).
-    eps_S_rel : float, optional
-        Relative spot bump for finite-difference Greeks (default 0.01).
-    eps_v_rel : float, optional
-        Relative variance bump for finite-difference Greeks (default 0.05).
-
-    Returns
-    -------
-    pd.DataFrame
-        Input slice augmented with Theo_Price, Delta, Gamma, Vega,
-        Theo_IV, IV_Diff, and Abs_IV_Diff columns.
+    VarianceSensitivity is dV/dv0, with other Heston parameters fixed.
+    Vega is a compatibility alias, not Black–Scholes volatility vega.
+    At the variance boundary use second-order forward differences.
     """
     validate_market_fft_config(options_slice, N, alpha, eta)
     kappa_v, theta_v, xi_v, rho, v0 = map(float, params)
@@ -257,7 +234,10 @@ def price_slice_with_heston_and_greeks(
     df = options_slice.copy()
     df = add_option_id_column(df)
 
-    eps_S = max(1e-4, eps_S_rel * S0)
+    if not (np.isfinite(S0) and S0 > 0 and 0 < eps_S_rel < 0.5
+            and np.isfinite(eps_v_rel) and eps_v_rel > 0):
+        raise ValueError("Spot and Greek bumps must be finite and positive; spot bump < 0.5.")
+    eps_S = eps_S_rel * S0
     eps_v = max(1e-5, eps_v_rel * max(v0, 1e-4))
 
     out_frames = []
@@ -268,7 +248,12 @@ def price_slice_with_heston_and_greeks(
         strikes = grp["Strike"].to_numpy(dtype=float)
         types = grp["Type"].to_numpy()
 
-        def model_prices_for(S_bump, v0_bump):
+        cache = {}
+
+        def model_prices_for(S_bump, v0_bump, grid_N=N):
+            key = (S_bump, v0_bump, grid_N)
+            if key in cache:
+                return cache[key]
             K_grid, call_grid = CM99_call_price_grid_fft(
                 S0=S_bump,
                 T=T,
@@ -278,29 +263,53 @@ def price_slice_with_heston_and_greeks(
                 xi_v=xi_v,
                 rho=rho,
                 v0=v0_bump,
-                N=N,
+                N=grid_N,
                 alpha=alpha,
                 eta=eta,
             )
             call_vals = interpolate_call_prices(strikes, K_grid, call_grid)
             put_vals = put_from_call_parity(call_vals, S_bump, strikes, r, T)
-            return np.where(types == "C", call_vals, put_vals)
+            cache[key] = np.where(types == "C", call_vals, put_vals)
+            return cache[key]
+
+        def estimates(hs, hv, grid_N):
+            f = lambda spot, variance: model_prices_for(spot, variance, grid_N)
+            p = f(S0, v0)
+            up, dn = f(S0 + hs, v0), f(S0 - hs, v0)
+            delta = (up - dn) / (2 * hs)
+            gamma = (up - 2 * p + dn) / hs**2
+            if v0 >= eps_v:
+                variance = (f(S0, v0 + hv) - f(S0, v0 - hv)) / (2 * hv)
+            else:
+                variance = (-3 * p + 4 * f(S0, v0 + hv) - f(S0, v0 + 2 * hv)) / (2 * hv)
+            return np.array([delta, gamma, variance])
+
+        def richardson(hs, hv, grid_N):
+            # Keep the same variance stencil at both scales near the boundary.
+            coarse = estimates(hs, hv, grid_N)
+            fine = estimates(hs / 2, hv / 2, grid_N)
+            return (4 * fine - coarse) / 3
 
         price_0 = model_prices_for(S0, v0)
-        price_up = model_prices_for(S0 + eps_S, v0)
-        price_dn = model_prices_for(max(S0 - eps_S, 1e-8), v0)
-        price_vu = model_prices_for(S0, v0 + eps_v)
-        price_vd = model_prices_for(S0, max(v0 - eps_v, 1e-8))
-
-        delta = (price_up - price_dn) / (2.0 * eps_S)
-        gamma = (price_up - 2.0 * price_0 + price_dn) / (eps_S ** 2)
-        vega = (price_vu - price_vd) / (2.0 * eps_v)
+        base = richardson(eps_S, eps_v, N)
+        refined = richardson(eps_S / 2, eps_v / 2, N)
+        reference = richardson(eps_S / 2, eps_v / 2, 2 * N)
+        tolerance = np.array([2e-5, 2e-5, 2e-3])[:, None] + 0.005 * np.abs(reference)
+        errors = np.maximum(np.abs(base - refined), np.abs(refined - reference))
+        if not np.all(np.isfinite(reference)) or not np.all(errors <= tolerance):
+            raise RuntimeError(
+                "Heston Greeks did not converge across bump sizes and FFT resolution "
+                f"(T={T:.6g}, N={N}); increase pricing resolution or review fitted parameters."
+            )
+        delta, gamma, vega = refined
 
         grp_out = grp.copy()
         grp_out["Theo_Price"] = price_0
         grp_out["Delta"] = delta
         grp_out["Gamma"] = gamma
+        grp_out["VarianceSensitivity"] = vega
         grp_out["Vega"] = vega
+        grp_out["Greek_Error_Ratio"] = np.max(errors / tolerance, axis=0)
 
         grp_out["Theo_IV"] = [
             implied_volatility_bs(
@@ -360,63 +369,64 @@ def select_target_contract(priced_universe_df):
 # HEDGING LOGIC
 # ==============================================================================
 
-def solve_gamma_vega_delta_hedge(priced_universe_df, target_option_id, target_position):
-    """
-    Hedge the target's gamma and vega with non-target options, then
-    delta-hedge the residual exposure with the underlying.
+HEDGE_MODES = ("gamma_delta_variance", "gamma_delta")
 
-    Parameters
-    ----------
-    priced_universe_df : pd.DataFrame
-        Must contain Option_ID, Delta, Gamma, and Vega columns.
-    target_option_id : str
-        ID of the target contract.
-    target_position : float
-        Signed position in the target (+1 long, -1 short).
 
-    Returns
-    -------
-    option_weights : dict
-        Mapping of Option_ID to signed weight.
-    w_underlying : float
-        Delta-hedge weight in the underlying.
+def solve_option_hedge(priced_universe_df, target_option_id, target_position,
+                       hedge_mode="gamma_delta_variance"):
+    """Return weights, stock hedge and diagnostics; reject unstable/unhedged risk.
+
+    Row scaling removes the units from the SVD. Singular values below 1e-3
+    of the largest are discarded. Compatible rank-deficient systems are allowed.
+    Policy limits: each hedge option <= 10, gross hedge options <= 20 per target.
     """
+    if hedge_mode not in HEDGE_MODES:
+        raise ValueError(f"hedge_mode must be one of {HEDGE_MODES}.")
     df = priced_universe_df.copy()
-
-    target = df[df["Option_ID"] == target_option_id]
-    if target.empty:
+    if "VarianceSensitivity" not in df:
+        df["VarianceSensitivity"] = df["Vega"]
+    if df["Option_ID"].duplicated().any():
+        raise ValueError("Hedge universe must contain unique option IDs.")
+    if not np.isfinite(target_position) or target_position == 0:
+        raise ValueError("Target position must be finite and nonzero.")
+    if not np.isfinite(df[["Delta", "Gamma", "VarianceSensitivity"]].to_numpy(float)).all():
+        raise ValueError("Hedge Greeks must be finite.")
+    target = df.loc[df["Option_ID"] == target_option_id]
+    if len(target) != 1:
         raise ValueError(f"Target {target_option_id} not found in priced universe.")
-
     target = target.iloc[0]
-    hedgers = df[df["Option_ID"] != target_option_id].copy()
+    hedgers = df.loc[df["Option_ID"] != target_option_id]
+    risks = ["Gamma"] + (["VarianceSensitivity"] if hedge_mode == "gamma_delta_variance" else [])
+    A = hedgers[risks].to_numpy(float).T
+    b = -target_position * target[risks].to_numpy(float)
+    scale = np.maximum(np.linalg.norm(A, axis=1), np.abs(b) / abs(target_position))
+    scale = np.where(scale > 0, scale, 1.0)
+    normalized = A / scale[:, None]
+    rhs = b / scale
+    hedge_w, _, rank, singular = np.linalg.lstsq(normalized, rhs, rcond=1e-3)
+    residual = normalized @ hedge_w - rhs
+    if np.max(np.abs(residual)) > 1e-6 * abs(target_position):
+        raise RuntimeError("Cannot neutralize requested Greeks with a stable hedge (rank deficient or ill-conditioned universe).")
+    gross = float(np.sum(np.abs(hedge_w))) / abs(target_position)
+    if gross > 20 or np.any(np.abs(hedge_w) > 10 * abs(target_position)):
+        raise RuntimeError("Hedge exceeds position limits: 10 per option or 20 gross per unit target.")
+    weights = {target_option_id: float(target_position)}
+    weights.update(zip(hedgers["Option_ID"], map(float, hedge_w)))
+    stock = -(target_position * float(target["Delta"]) + hedge_w @ hedgers["Delta"].to_numpy(float))
+    net = target_position * target[["Delta", "Gamma", "VarianceSensitivity"]].to_numpy(float)
+    net += hedge_w @ hedgers[["Delta", "Gamma", "VarianceSensitivity"]].to_numpy(float)
+    net[0] += stock
+    condition = float(singular[0] / singular[-1]) if len(singular) == len(risks) and singular[-1] > 0 else np.inf
+    diagnostics = dict(hedge_rank=int(rank), hedge_condition=condition,
+                       hedge_gross_options=gross, hedge_residual=float(np.max(np.abs(residual))),
+                       net_variance_sensitivity=float(net[2]))
+    return weights, float(stock), diagnostics
 
-    option_weights = {target_option_id: float(target_position)}
 
-    if hedgers.empty:
-        w_underlying = -target_position * float(target["Delta"])
-        return option_weights, float(w_underlying)
-
-    A = np.vstack([
-        hedgers["Gamma"].to_numpy(dtype=float),
-        hedgers["Vega"].to_numpy(dtype=float),
-    ])
-    b = -target_position * np.array([
-        float(target["Gamma"]),
-        float(target["Vega"]),
-    ])
-
-    # Minimum-norm solution
-    hedge_w = np.linalg.lstsq(A, b, rcond=None)[0]
-
-    hedger_ids = hedgers["Option_ID"].tolist()
-    for oid, w in zip(hedger_ids, hedge_w):
-        option_weights[oid] = float(w)
-
-    total_delta = target_position * float(target["Delta"])
-    total_delta += float(np.dot(hedge_w, hedgers["Delta"].to_numpy(dtype=float)))
-
-    w_underlying = -total_delta
-    return option_weights, float(w_underlying)
+def solve_gamma_vega_delta_hedge(priced_universe_df, target_option_id, target_position):
+    """Compatibility wrapper for gamma–delta–variance hedging (Vega = dV/dv0)."""
+    weights, stock, _ = solve_option_hedge(priced_universe_df, target_option_id, target_position)
+    return weights, stock
 
 
 # ==============================================================================
@@ -449,6 +459,7 @@ def zero_current_positions(state_df, t_idx):
     state_df.loc[t_idx, "net_delta"] = 0.0
     state_df.loc[t_idx, "net_gamma"] = 0.0
     state_df.loc[t_idx, "net_vega"] = 0.0
+    state_df.loc[t_idx, "net_variance_sensitivity"] = 0.0
 
 
 def write_row_metrics(state_df, t_idx, full_slice, priced_universe_df, option_weights, w_underlying,
@@ -515,6 +526,7 @@ def write_row_metrics(state_df, t_idx, full_slice, priced_universe_df, option_we
     state_df.loc[t_idx, "net_delta"] = net_delta
     state_df.loc[t_idx, "net_gamma"] = net_gamma
     state_df.loc[t_idx, "net_vega"] = net_vega
+    state_df.loc[t_idx, "net_variance_sensitivity"] = net_vega
 
     state_df.loc[t_idx, "target_option_id"] = target_option_id
     state_df.loc[t_idx, "target_position"] = float(target_position)
@@ -598,6 +610,7 @@ def run_vol_arb_strategy(
     n_each_side=3,
     dt=1/252,
     exit_days_before_expiry=10,
+    hedge_mode="gamma_delta_variance",
 ):
     """
     Run the full volatility arbitrage strategy over all timesteps.
@@ -628,6 +641,9 @@ def run_vol_arb_strategy(
         Time step in years (default 1/252).
     exit_days_before_expiry : int, optional
         Days before expiry at which positions are zeroed (default 10).
+    hedge_mode : str, optional
+        "gamma_delta_variance" (default) or "gamma_delta". The latter leaves
+        variance sensitivity unconstrained. Unstable hedges raise RuntimeError.
 
     Returns
     -------
@@ -636,6 +652,8 @@ def run_vol_arb_strategy(
     initial_gross_exposure : float
         Gross notional exposure at inception.
     """
+    if hedge_mode not in HEDGE_MODES:
+        raise ValueError(f"hedge_mode must be one of {HEDGE_MODES}.")
     if calibration_N is not None and calibration_N != pricing_N:
         raise ValueError("calibration_N must equal pricing_N; use one FFT configuration.")
     validate_market_fft_config(options_market_df, pricing_N, alpha, eta)
@@ -646,7 +664,10 @@ def run_vol_arb_strategy(
         raise ValueError("options_market_df must already contain Market_IV.")
 
     time_indices = sorted(df["t_index"].unique())
-    state_df = initialize_strategy_state_df(df)
+    state_df = initialize_strategy_state_df(df).copy()
+    state_df["hedge_mode"] = hedge_mode
+    for name in ("hedge_rank", "hedge_condition", "hedge_gross_options", "hedge_residual", "greek_error_ratio"):
+        state_df[name] = np.nan
 
     target_option_id = None
     target_position = None
@@ -693,25 +714,32 @@ def run_vol_arb_strategy(
         write_model_params(state_df, t_idx, trader_params)
 
         # 2) Theoretical pricing, Greeks, and implied volatility
-        priced_universe_df = price_slice_with_heston_and_greeks(
-            universe_df,
-            S0=S_t,
-            params=trader_params,
-            N=pricing_N,
-            alpha=alpha,
-            eta=eta,
-        )
+        try:
+            priced_universe_df = price_slice_with_heston_and_greeks(
+                universe_df,
+                S0=S_t,
+                params=trader_params,
+                N=pricing_N,
+                alpha=alpha,
+                eta=eta,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"Greeks at time index {t_idx}: {exc}") from exc
 
         # 3) Target selection — performed only once at inception
         if target_option_id is None:
             target_option_id, target_position, _ = select_target_contract(priced_universe_df)
 
-        # 4) Gamma/vega/delta hedge around the fixed target
-        option_weights, w_underlying = solve_gamma_vega_delta_hedge(
-            priced_universe_df,
-            target_option_id=target_option_id,
-            target_position=target_position,
-        )
+        # 4) Explicit risk constraints, with numerical stability and size checks.
+        try:
+            option_weights, w_underlying, diagnostics = solve_option_hedge(
+                priced_universe_df, target_option_id, target_position, hedge_mode=hedge_mode,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"Hedge at time index {t_idx}: {exc}") from exc
+        for name, value in diagnostics.items():
+            state_df.loc[t_idx, name] = value
+        state_df.loc[t_idx, "greek_error_ratio"] = priced_universe_df["Greek_Error_Ratio"].max()
 
         # 5) Gross exposure — recorded only once at inception
         if initial_gross_exposure is None:
