@@ -24,10 +24,10 @@ def plot_stochastic_volatility_jump_path(
         S0=100.0,            # initial price
         mu=0.03,             # drift (3% annual)
         r=0.02,              # risk-free rate (for reference)
-        v0=0.03514,          # initial variance (20% vol)
+        v0=0.03514,          # initial variance (~18.7% annualized volatility)
         kappa=11.31,         # mean reversion speed
-        theta=0.05167,       # long-term variance (5% vol)
-        xi=0.2459,           # volatility of volatility (25%)
+        theta=0.05167,       # long-run variance (~22.7% volatility)
+        xi=0.2459,           # volatility of variance
         rho=-0.6833,         # strong negative correlation for leverage effect
         jump_intensity=0.7,  # average 0.7 jumps per year
         jump_mean=-0.02,     # average jump size (-2% for downward bias)
@@ -218,11 +218,11 @@ def generate_market_option_prices_across_time(
     window, rounded outward to the grid. The universe stays fixed thereafter;
     future spot prices do not determine which contracts are available.
 
-    The market model is a perturbed version of the true parameters; at each
+    Market parameters are supplied separately from the path generator. At each
     timestep the current state is:
 
         S_t       = S_window[t]
-        v_t_market = v_window[t] * 1.05
+        v_t_market = max(v_window[t] * 1.05, 1e-10)
 
     Parameters
     ----------
@@ -230,8 +230,11 @@ def generate_market_option_prices_across_time(
         Simulated price path.
     v_path : array-like
         Simulated variance path.
-    v0_m, kappa_m, theta_m, xi_m, rho_m : float
-        Market Heston parameters (perturbed from true params).
+    v0_m : float
+        Legacy argument retained for compatibility; unused. Current market
+        variance is taken from v_path as described above.
+    kappa_m, theta_m, xi_m, rho_m : float
+        Market Heston parameters, independent of the path-generator parameters.
     jump_intensity_m, jump_mean_m, jump_std_m : float
         Market jump parameters.
     r : float, optional
@@ -245,7 +248,8 @@ def generate_market_option_prices_across_time(
     eta : float, optional
         Frequency grid spacing (default 0.25).
     use_last_n : int, optional
-        Number of trailing timesteps to use (default 60).
+        Number of trailing observations, including inception and expiry (default 60).
+        Initial time to expiry is (use_last_n - 1) * dt.
     noise_scale : float, optional
         Must be zero (default). Independent quote noise is disabled because it
         breaks put-call parity and cross-strike consistency.

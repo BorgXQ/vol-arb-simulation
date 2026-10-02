@@ -38,7 +38,7 @@ from src.calc import (  # noqa: E402
 
 DEFAULTS = {
     "seed": 1,
-    "use_last_n": 60,
+    "use_last_n": 12,  # 11 trading days to expiry plus the inception observation
     "kappa": 6.4,
     "theta": 0.077,
     "xi": 0.24,
@@ -57,6 +57,19 @@ DEFAULTS = {
     "dt": 1 / 252,
     "r": 0.02,
 }
+
+
+TTE_MIN_DAYS = 11
+TTE_MAX_DAYS = 30
+CONTROL_KEYS = ("seed", "kappa", "theta", "xi", "rho", "jump_on", "lambdaj", "muj", "sigmaj", "hedge_mode")
+
+
+def settings_from_controls(controls):
+    """Translate actual TTE into the generator's observation count."""
+    settings = dict(DEFAULTS)
+    settings.update({key: controls[key] for key in CONTROL_KEYS})
+    settings["use_last_n"] = int(controls["tte_days"]) + 1
+    return settings
 
 
 # -----------------------------
@@ -84,6 +97,7 @@ def run_analysis_cached(
     r: float,
     hedge_mode: str = "gamma_delta_variance",
 ):
+    run_settings = locals().copy()  # All pipeline arguments, captured before computation.
     if noise_scale != 0:
         raise ValueError("Quote noise is disabled for the baseline; noise_scale must be 0.")
 
@@ -158,6 +172,7 @@ def run_analysis_cached(
     priced_universe_t0 = ensure_target_in_universe(full_slice_t0, priced_universe_t0, target_option_id_t0)
 
     return {
+        "run_settings": run_settings,
         "S_path": S_path,
         "v_path": v_path,
         "t_grid": t_grid,
@@ -473,36 +488,57 @@ def make_strategy_dashboard_figure(state_df_reduced: pd.DataFrame, initial_gross
 def reset_defaults():
     for key, value in DEFAULTS.items():
         st.session_state[key] = value
+    st.session_state["tte_days"] = DEFAULTS["use_last_n"] - 1
     st.session_state.pop("analysis_result", None)
 
 
 def main():
     st.set_page_config(page_title="Volatility Arbitrage Simulator", layout="wide")
     st.title("Volatility Arbitrage Research Dashboard")
-    st.caption("Bates market generation, Heston trader calibration, hedged target-contract diagnostics.")
+    st.caption("Explore model disagreement: a simulated Heston-plus-jumps path, Bates option quotes, "
+               "and a calibrated Heston trader with dynamic hedging.")
+    with st.expander("How the simulation works"):
+        st.markdown(
+            "1. **Underlying path:** a simulated physical Heston-plus-jumps process uses fixed generator parameters. "
+            "The seed changes its realization.\n"
+            "2. **Option market:** Bates quotes use the pricing parameters in the sidebar and "
+            "1.05 × the current simulated variance. The jump toggle affects these quotes.\n"
+            "3. **Trader:** Heston parameters are fitted to current quotes, without access to future path values "
+            "or the true path parameters. The selected target stays fixed while hedges are recalculated.\n\n"
+            "Price disagreement is a model-relative signal; profitability is an outcome of the experiment. "
+            "Gamma–delta–variance hedging also neutralizes sensitivity to initial variance, dV/dv₀. "
+            "This is distinct from Black–Scholes volatility vega."
+        )
 
     for key, value in DEFAULTS.items():
         st.session_state.setdefault(key, value)
 
+    st.session_state.setdefault("tte_days", DEFAULTS["use_last_n"] - 1)
+
     with st.sidebar:
         st.header("Controls")
         st.number_input("Input seed", min_value=0, step=1, key="seed")
-        st.caption("Seed controls the randomness of the simulated market. Change for new paths and market scenarios.")
-        st.subheader("Market Model Parameters")
+        st.caption("Seed selects the underlying path realization. The path generator parameters stay fixed.")
+        st.subheader("Option-market pricing parameters")
+        st.caption("These parameters change option quotes. They do not change the simulated underlying path "
+                   "or directly set the trader parameters, which are calibrated.")
         st.slider("κ (mean reversion speed)", min_value=1.0, max_value=15.0, step=0.1, key="kappa")
         st.slider("θ (long-term variance)", min_value=0.01, max_value=0.15, step=0.001, key="theta", format="%.3f")
-        st.slider("ξ (volatility of volatility)", min_value=0.05, max_value=0.80, step=0.005, key="xi", format="%.3f")
-        st.slider("ρ (correlation)", min_value=-0.95, max_value=0.0, step=0.01, key="rho")
+        st.slider("ξ (volatility of variance)", min_value=0.05, max_value=0.80, step=0.005, key="xi", format="%.3f")
+        st.slider("ρ (spot/variance correlation)", min_value=-0.95, max_value=0.0, step=0.01, key="rho")
         st.caption("Quote noise is disabled for the baseline simulation.")
-        st.toggle("Jump diffusion", key="jump_on")
+        st.toggle("Jumps in option-market pricing", key="jump_on")
         st.slider("λ (jump intensity)", min_value=0.0, max_value=3.0, step=0.01, key="lambdaj", disabled=not st.session_state["jump_on"])
-        st.slider("μⱼ (jump mean)", min_value=-0.30, max_value=0.0, step=0.005, key="muj", format="%.3f", disabled=not st.session_state["jump_on"])
-        st.slider("σⱼ (jump std)", min_value=0.0, max_value=0.30, step=0.005, key="sigmaj", format="%.3f", disabled=not st.session_state["jump_on"])
+        st.slider("μⱼ (mean log-jump)", min_value=-0.30, max_value=0.0, step=0.005, key="muj", format="%.3f", disabled=not st.session_state["jump_on"])
+        st.slider("σⱼ (log-jump standard deviation)", min_value=0.0, max_value=0.30, step=0.005, key="sigmaj", format="%.3f", disabled=not st.session_state["jump_on"])
         st.subheader("Strategy Window")
         st.selectbox("Hedge constraints", ["gamma_delta_variance", "gamma_delta"],
                      format_func=lambda mode: {"gamma_delta_variance": "Gamma–delta–variance",
                                                "gamma_delta": "Gamma–delta"}[mode], key="hedge_mode")
-        st.slider("Time to expiry (trading days)", min_value=20, max_value=60, step=1, key="use_last_n")
+        st.slider("Initial time to expiry (trading days)", min_value=TTE_MIN_DAYS,
+                  max_value=TTE_MAX_DAYS, step=1, key="tte_days")
+        st.caption(f"Positions close with {DEFAULTS['exit_days_before_expiry']} trading days remaining. "
+                   "11 days gives one holding interval; 30 gives 20. Each window includes inception and expiry.")
         st.caption("Analysis time increases with the selected window length.")
         st.caption("It is recommended to clone the repository and run locally for faster execution.")
         st.button("Reset to defaults", use_container_width=True, on_click=reset_defaults)
@@ -514,31 +550,24 @@ def main():
 
     if run_clicked:
         with st.spinner("Running full pricing, calibration, and hedging analysis..."):
-            st.session_state["analysis_result"] = run_analysis_cached(
-                seed=st.session_state["seed"],
-                use_last_n=st.session_state["use_last_n"],
-                kappa=st.session_state["kappa"],
-                theta=st.session_state["theta"],
-                xi=st.session_state["xi"],
-                rho=st.session_state["rho"],
-                jump_on=st.session_state["jump_on"],
-                lambdaj=st.session_state["lambdaj"],
-                muj=st.session_state["muj"],
-                sigmaj=st.session_state["sigmaj"],
-                noise_scale=DEFAULTS["noise_scale"],
-                exit_days_before_expiry=st.session_state["exit_days_before_expiry"],
-                hedge_mode=st.session_state["hedge_mode"],
-                pricing_N=DEFAULTS["pricing_N"],
-                alpha=DEFAULTS["alpha"],
-                eta=DEFAULTS["eta"],
-                n_each_side=st.session_state["n_each_side"],
-                dt=st.session_state["dt"],
-                r=st.session_state["r"],
-            )
+            st.session_state["analysis_result"] = run_analysis_cached(**settings_from_controls(st.session_state))
 
     result = st.session_state.get("analysis_result")
     if result is None:
         return
+
+    if "run_settings" not in result:
+        st.info("Rerun analysis to attach the run settings to these results.")
+        return
+    run_settings = result["run_settings"]
+    if settings_from_controls(st.session_state) != run_settings:
+        st.info("Controls have changed. Results below still show the last completed run; click Run analysis to update them.")
+    st.caption(f"Displayed run: seed {run_settings['seed']} · "
+               f"initial expiry {run_settings['use_last_n'] - 1} trading days · "
+               f"exit with {run_settings['exit_days_before_expiry']} days remaining · "
+               f"hedge {run_settings['hedge_mode'].replace('_', '–')}.")
+    with st.expander("Settings used for displayed results"):
+        st.json(dict(run_settings, initial_tte_days=run_settings["use_last_n"] - 1))
 
     S_path = result["S_path"]
     v_path = result["v_path"]
@@ -555,7 +584,7 @@ def main():
     target_option_id_t0 = result["target_option_id_t0"]
 
     # Summary metrics.
-    window_start = max(0, len(S_path) - st.session_state["use_last_n"])
+    window_start = max(0, len(S_path) - run_settings["use_last_n"])
     summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
     summary_col1.metric("Target Contract", str(target_option_id_t0))
     summary_col2.metric("Target Position", "Long" if result["target_position_t0"] > 0 else "Short")
@@ -563,7 +592,7 @@ def main():
     summary_col4.metric(f"t={window_start} IV Diff", f"{float(target_row_t0['IV_Diff']):.6f}")
 
     # Row 1
-    st.plotly_chart(make_path_figure(S_path, v_path, st.session_state["use_last_n"]), use_container_width=True)
+    st.plotly_chart(make_path_figure(S_path, v_path, run_settings["use_last_n"]), use_container_width=True)
 
     # Row 2
     row2_left, row2_right = st.columns([2, 1])
