@@ -5,6 +5,10 @@ from plotly.subplots import make_subplots
 from scipy.stats import norm
 from scipy.optimize import brentq
 from src.calc import (
+    DEFAULT_FFT_N,
+    DEFAULT_FFT_ALPHA,
+    DEFAULT_FFT_ETA,
+    validate_fft_config,
     CM99_call_price_grid_jd_fft,
     interpolate_call_prices,
     put_from_call_parity
@@ -198,9 +202,9 @@ def generate_market_option_prices_across_time(
     jump_std_m,
     r=0.02,
     dt=1/252,
-    N=1024,
-    alpha=1.5,
-    eta=0.25,
+    N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA,
     use_last_n=60,
     noise_scale=0.005,
 ):
@@ -234,7 +238,7 @@ def generate_market_option_prices_across_time(
     dt : float, optional
         Time step in years (default 1/252).
     N : int, optional
-        FFT grid size (default 1024).
+        FFT grid size (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -249,6 +253,8 @@ def generate_market_option_prices_across_time(
     options_df : pd.DataFrame
         Long-format DataFrame with one row per contract per timestep.
     """
+
+    fft_config = validate_fft_config(N, alpha, eta)
 
     # Window selection
     S_window = np.asarray(S_path[-use_last_n:], dtype=float)
@@ -350,6 +356,7 @@ def generate_market_option_prices_across_time(
             })
 
     options_df = pd.DataFrame(rows)
+    options_df.attrs["fft_config"] = fft_config
 
     return options_df
 

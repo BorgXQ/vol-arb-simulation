@@ -1,5 +1,41 @@
 import numpy as np
-from scipy.optimize import brute, fmin
+from scipy.interpolate import CubicSpline
+from scipy.optimize import brute, least_squares, minimize
+
+
+# Shared by market generation, calibration, valuation, and finite differences.
+# Validated against direct integration in tests/test_pricing_consistency.py.
+DEFAULT_FFT_N = 16384
+DEFAULT_FFT_ALPHA = 1.5
+DEFAULT_FFT_ETA = 0.25
+
+
+def validate_fft_config(N, alpha, eta):
+    """Validate and return a comparable FFT configuration tuple."""
+    if isinstance(N, (bool, np.bool_)) or not isinstance(N, (int, np.integer)):
+        raise ValueError("FFT N must be an integer power of two, at least 64.")
+    if N < 64 or N & (N - 1):
+        raise ValueError("FFT N must be an integer power of two, at least 64.")
+    if not np.isfinite(alpha) or alpha <= 0 or not np.isfinite(eta) or eta <= 0:
+        raise ValueError("FFT alpha and eta must be finite and positive.")
+    return int(N), float(alpha), float(eta)
+
+
+def validate_market_fft_config(options, N, alpha, eta):
+    """Reject inconsistent settings when quotes retain generation metadata."""
+    config = validate_fft_config(N, alpha, eta)
+    market_config = options.attrs.get("fft_config")
+    if market_config is not None and tuple(market_config) != config:
+        raise ValueError("Market generation, calibration, and valuation must use the same FFT configuration.")
+
+
+def _valid_heston_params(params):
+    """The Feller condition is sufficient, but not required for Heston pricing."""
+    params = np.asarray(params, dtype=float)
+    if params.shape != (5,) or not np.all(np.isfinite(params)):
+        return False
+    kappa, theta, xi, rho, v0 = params
+    return kappa > 0 and theta > 0 and xi > 0 and -1 < rho < 1 and v0 >= 0
 
 
 def H93_char_func_cm(u, S0, v0, kappa_v, theta_v, xi_v, rho, r, T):
@@ -130,9 +166,9 @@ def CM99_call_price_grid_jd_fft(
     lambda_j,
     mu_j,
     sigma_j,
-    N=4096,
-    alpha=1.5,
-    eta=0.25
+    N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA
 ):
     """
     Price a full strike grid in a single FFT call using the Heston + jump
@@ -151,7 +187,7 @@ def CM99_call_price_grid_jd_fft(
     lambda_j, mu_j, sigma_j : float
         Merton jump parameters (intensity, mean log-jump, std log-jump).
     N : int, optional
-        FFT grid size (default 4096).
+        FFT grid size (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -164,6 +200,12 @@ def CM99_call_price_grid_jd_fft(
     call_prices : ndarray
         Call prices on the strike grid.
     """
+    validate_fft_config(N, alpha, eta)
+    if not _valid_heston_params((kappa_v, theta_v, xi_v, rho, v0)):
+        raise ValueError("Invalid Heston parameters: require positive kappa, theta, xi, |rho| < 1, and v0 >= 0.")
+    if not np.all(np.isfinite([S0, T, r])) or S0 <= 0 or T <= 0:
+        raise ValueError("Pricing requires finite S0, T, r and positive S0 and T.")
+
     lambda_val = 2 * np.pi / (N * eta)
     b = 0.5 * N * lambda_val
 
@@ -196,6 +238,8 @@ def CM99_call_price_grid_jd_fft(
     y = np.fft.fft(fft_input)
 
     call_prices = np.exp(-alpha * k_grid) / np.pi * np.real(y)
+    if not np.all(np.isfinite(call_prices)):
+        raise FloatingPointError("Nonfinite FFT prices; check parameters and damping.")
     call_prices = np.maximum(call_prices, 0.0)
 
     K_grid = np.exp(k_grid)
@@ -211,9 +255,9 @@ def CM99_call_price_grid_fft(
     xi_v,
     rho,
     v0,
-    N=4096,
-    alpha=1.5,
-    eta=0.25,
+    N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA,
 ):
     """
     Price a full strike grid in a single FFT call using the pure Heston
@@ -230,7 +274,7 @@ def CM99_call_price_grid_fft(
     kappa_v, theta_v, xi_v, rho, v0 : float
         Heston variance process parameters.
     N : int, optional
-        FFT grid size (default 4096).
+        FFT grid size (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -243,6 +287,12 @@ def CM99_call_price_grid_fft(
     call_prices : ndarray
         Call prices on the strike grid.
     """
+    validate_fft_config(N, alpha, eta)
+    if not _valid_heston_params((kappa_v, theta_v, xi_v, rho, v0)):
+        raise ValueError("Invalid Heston parameters: require positive kappa, theta, xi, |rho| < 1, and v0 >= 0.")
+    if not np.all(np.isfinite([S0, T, r])) or S0 <= 0 or T <= 0:
+        raise ValueError("Pricing requires finite S0, T, r and positive S0 and T.")
+
     lambda_val = 2 * np.pi / (N * eta)
     b = 0.5 * N * lambda_val
 
@@ -272,6 +322,8 @@ def CM99_call_price_grid_fft(
     y = np.fft.fft(fft_input)
 
     call_prices = np.exp(-alpha * k_grid) / np.pi * np.real(y)
+    if not np.all(np.isfinite(call_prices)):
+        raise FloatingPointError("Nonfinite FFT prices; check parameters and damping.")
     call_prices = np.maximum(call_prices, 0.0)
 
     K_grid = np.exp(k_grid)
@@ -282,7 +334,8 @@ def interpolate_call_prices(target_strikes, K_grid, call_grid):
     """
     Interpolate call prices from the FFT strike grid to a set of target strikes.
 
-    Uses linear interpolation; faster and more stable than cubic for this use case.
+    Uses cubic interpolation to avoid linear-interpolation pricing bias. Strikes
+    outside the grid are rejected rather than assigned an endpoint price.
 
     Parameters
     ----------
@@ -298,13 +351,15 @@ def interpolate_call_prices(target_strikes, K_grid, call_grid):
     ndarray
         Interpolated call prices at target_strikes.
     """
-    return np.interp(
-        target_strikes,
-        K_grid,
-        call_grid,
-        left=call_grid[0],
-        right=call_grid[-1],
-    )
+    target_strikes = np.asarray(target_strikes, dtype=float)
+    if not np.all(np.isfinite(target_strikes)) or np.any(target_strikes <= 0):
+        raise ValueError("Target strikes must be finite and positive.")
+    if np.any(target_strikes < K_grid[0]) or np.any(target_strikes > K_grid[-1]):
+        raise ValueError("Target strikes fall outside the FFT grid; adjust eta.")
+    prices = CubicSpline(K_grid, call_grid, extrapolate=False)(target_strikes)
+    if not np.all(np.isfinite(prices)):
+        raise FloatingPointError("Nonfinite interpolated option prices.")
+    return np.maximum(prices, 0.0)
 
 
 def put_from_call_parity(call_prices, S0, strikes, r, T):
@@ -326,61 +381,14 @@ def put_from_call_parity(call_prices, S0, strikes, r, T):
     return np.maximum(call_prices - S0 + strikes * np.exp(-r * T), 0.0)
 
 
-def CM99_error_function_vectorized(
-    p0,
-    options,
-    S0,
-    N=4096,
-    alpha=1.5,
-    eta=0.25,
-    _state=None,
-):
-    """
-    Calibration error function: mean squared error between model and market prices.
-
-    Groups options by maturity/rate so each group requires only one FFT call.
-
-    Parameters
-    ----------
-    p0 : array-like
-        Parameter vector (kappa_v, theta_v, xi_v, rho, v0).
-    options : pd.DataFrame
-        Must contain columns: Strike, Type, T, r, Market_Price.
-    S0 : float
-        Current underlying price.
-    N : int, optional
-        FFT grid size (default 4096).
-    alpha : float, optional
-        Carr-Madan damping parameter (default 1.5).
-    eta : float, optional
-        Frequency grid spacing (default 0.25).
-    _state : dict or None, optional
-        Mutable dict for tracking iteration history and progress bar.
-
-    Returns
-    -------
-    float
-        MSE (plus any boundary penalties).
-    """
+def _heston_price_residuals(p0, options, S0, N, alpha, eta):
+    """Signed per-option pricing errors shared by both local solvers."""
+    if not _valid_heston_params(p0):
+        return np.full(len(options), np.inf)
     kappa_v, theta_v, xi_v, rho, v0 = p0
 
-    # Hard constraints
-    if kappa_v < 0.0 or theta_v < 0.005 or xi_v < 0.05 or not (-1.0 < rho < 1.0):
-        return 500.0
-    if 2.0 * kappa_v * theta_v < xi_v**2:
-        return 500.0
-
-    # Soft penalties
-    boundary_penalty = 0.0
-    if abs(rho + 1.0) < 0.01 or abs(rho - 1.0) < 0.01:
-        boundary_penalty += 10.0
-    if xi_v < 0.08:
-        boundary_penalty += 20.0
-    if v0 < 0.005:
-        boundary_penalty += 5.0
-
     # Group by maturity and rate so each group uses one FFT
-    se_all = []
+    residuals = []
 
     grouped = options.groupby(["T", "r"], sort=False)
 
@@ -414,16 +422,56 @@ def CM99_error_function_vectorized(
             )
 
             model_prices = np.where(types == "C", model_calls, model_puts)
-            se_all.append((model_prices - market_prices) ** 2)
+            if not np.all(np.isfinite(model_prices)):
+                return np.full(len(options), np.inf)
+            residuals.append(model_prices - market_prices)
 
-        except Exception:
-            se_all.append(np.full(len(group), 100.0))
+        except (ValueError, FloatingPointError, OverflowError):
+            return np.full(len(options), np.inf)
 
-    if se_all:
-        se_concat = np.concatenate(se_all)
-        mse = float(np.mean(se_concat)) + boundary_penalty
-    else:
-        mse = 500.0 + boundary_penalty
+    return np.concatenate(residuals) if residuals else np.array([np.inf])
+
+
+def CM99_error_function_vectorized(
+    p0,
+    options,
+    S0,
+    N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA,
+    _state=None,
+):
+    """
+    Calibration error function: mean squared error between model and market prices.
+
+    Groups options by maturity/rate so each group requires only one FFT call.
+
+    Parameters
+    ----------
+    p0 : array-like
+        Parameter vector (kappa_v, theta_v, xi_v, rho, v0).
+    options : pd.DataFrame
+        Must contain columns: Strike, Type, T, r, Market_Price.
+    S0 : float
+        Current underlying price.
+    N : int, optional
+        FFT grid size (default 16384).
+    alpha : float, optional
+        Carr-Madan damping parameter (default 1.5).
+    eta : float, optional
+        Frequency grid spacing (default 0.25).
+    _state : dict or None, optional
+        Mutable dict for tracking iteration history and progress bar.
+
+    Returns
+    -------
+    float
+        MSE, or infinity for invalid parameters or nonfinite model prices.
+    """
+    residuals = _heston_price_residuals(p0, options, S0, N, alpha, eta)
+    mse = float(np.mean(residuals**2))
+    if not np.isfinite(mse):
+        return np.inf
 
     if _state is not None:
         _state["min_MSE"] = min(_state["min_MSE"], mse)
@@ -444,10 +492,17 @@ def CM99_error_function_vectorized(
     return mse
 
 
-def CM99_calibration_market(options, S0, N=4096, alpha=1.5, eta=0.25):
+def CM99_calibration_market(
+    options, S0, N=DEFAULT_FFT_N, alpha=DEFAULT_FFT_ALPHA, eta=DEFAULT_FFT_ETA
+):
     """
     Calibrate Heston parameters to market option prices via a two-stage
-    brute-force grid search followed by Nelder-Mead local refinement.
+    brute-force grid search followed by bounded Nelder-Mead local refinement.
+    If the simplex does not converge, retry with scaled, bounded nonlinear
+    least squares from its best finite iterate (or the grid seed).
+
+    Invalid inputs raise ValueError. Failed optimization or nonfinite final
+    prices raise RuntimeError; unsuccessful fits are never silently returned.
 
     Parameters
     ----------
@@ -456,7 +511,7 @@ def CM99_calibration_market(options, S0, N=4096, alpha=1.5, eta=0.25):
     S0 : float
         Current underlying price.
     N : int, optional
-        FFT grid size (default 4096).
+        FFT grid size (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -473,9 +528,21 @@ def CM99_calibration_market(options, S0, N=4096, alpha=1.5, eta=0.25):
     iteration_history : list of int
         Iteration index corresponding to each MSE entry.
     """
+    validate_market_fft_config(options, N, alpha, eta)
+    required = {"Strike", "Type", "T", "r", "Market_Price"}
+    if not required.issubset(options.columns) or options.empty:
+        raise ValueError("Calibration needs nonempty quotes with Strike, Type, T, r, Market_Price.")
+    numeric = options[["Strike", "T", "r", "Market_Price"]].to_numpy(dtype=float)
+    if not np.isfinite(S0) or S0 <= 0 or not np.all(np.isfinite(numeric)):
+        raise ValueError("Calibration requires finite quotes and a positive finite spot.")
+    if (options[["Strike", "T"]] <= 0).any().any() or (options["Market_Price"] < 0).any():
+        raise ValueError("Calibration requires positive strikes/maturities and nonnegative prices.")
+    if not options["Type"].isin(["C", "P"]).all():
+        raise ValueError("Calibration option types must be C or P.")
+
     state = {
         "i": 0,
-        "min_MSE": 500.0,
+        "min_MSE": np.inf,
         "MSE_history": [],
         "iteration_history": [],
     }
@@ -501,15 +568,66 @@ def CM99_calibration_market(options, S0, N=4096, alpha=1.5, eta=0.25):
 
     p0 = brute(error_func, param_grid, finish=None)
     stage1_end_iter = len(state["iteration_history"])
+    if not np.isfinite(error_func(p0)):
+        raise RuntimeError("Calibration grid search found no finite pricing candidate.")
 
-    opt = fmin(
-        func=error_func,
+    lower_bounds = np.array([1e-6, 1e-8, 1e-6, -0.999999, 0.0])
+    upper_bounds = np.array([np.inf, np.inf, np.inf, 0.999999, np.inf])
+    result = minimize(
+        fun=error_func,
         x0=p0,
-        xtol=1e-6,
-        ftol=1e-6,
-        maxiter=750,
-        maxfun=900,
-        disp=False,
+        method="Nelder-Mead",
+        bounds=list(zip(lower_bounds, upper_bounds)),
+        options={"xatol": 1e-6, "fatol": 1e-12, "maxiter": 4000, "maxfev": 6000},
     )
+    if not result.success:
+        simplex_message = str(result.message)
+        restart = p0
+        if _valid_heston_params(result.x) and np.isfinite(error_func(result.x)):
+            restart = np.clip(result.x, lower_bounds, upper_bounds)
 
-    return opt, stage1_end_iter, state["MSE_history"], state["iteration_history"]
+        def residual_func(params):
+            residuals = _heston_price_residuals(params, options, S0, N, alpha, eta)
+            mse = float(np.mean(residuals**2))
+            if np.isfinite(mse):
+                state["min_MSE"] = min(state["min_MSE"], mse)
+                state["MSE_history"].append(mse)
+                state["iteration_history"].append(state["i"])
+                state["i"] += 1
+            return residuals
+
+        # Scaling handles disparate parameter units and weakly identified fits.
+        # A larger derivative step avoids differencing FFT roundoff. Retain the
+        # same squared-price-error objective and the full pricing resolution.
+        try:
+            retry = least_squares(
+                residual_func,
+                restart,
+                bounds=(lower_bounds, upper_bounds),
+                method="trf",
+                x_scale="jac",
+                diff_step=1e-4,
+                ftol=1e-8,
+                xtol=1e-8,
+                gtol=1e-8,
+                max_nfev=1000,
+            )
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+            raise RuntimeError(
+                f"Heston calibration failed. Nelder-Mead: {simplex_message}; "
+                f"least-squares retry could not run: {exc}"
+            ) from exc
+        if not retry.success:
+            raise RuntimeError(
+                f"Heston calibration failed. Nelder-Mead: {simplex_message}; "
+                f"least-squares retry: {retry.message}"
+            )
+        result = retry
+    if (
+        not _valid_heston_params(result.x)
+        or not np.all(np.isfinite(result.fun))
+        or not np.isfinite(error_func(result.x))
+    ):
+        raise RuntimeError("Heston calibration returned invalid parameters or nonfinite prices.")
+
+    return result.x, stage1_end_iter, state["MSE_history"], state["iteration_history"]

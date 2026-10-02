@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 from src.utils import implied_volatility_bs
 from src.calc import (
+    DEFAULT_FFT_N,
+    DEFAULT_FFT_ALPHA,
+    DEFAULT_FFT_ETA,
+    validate_market_fft_config,
     interpolate_call_prices,
     put_from_call_parity,
     CM99_call_price_grid_fft,
@@ -212,9 +216,9 @@ def price_slice_with_heston_and_greeks(
     options_slice,
     S0,
     params,
-    N=4096,
-    alpha=1.5,
-    eta=0.25,
+    N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA,
     eps_S_rel=0.01,
     eps_v_rel=0.05,
 ):
@@ -231,7 +235,7 @@ def price_slice_with_heston_and_greeks(
     params : array-like
         Heston parameters (kappa_v, theta_v, xi_v, rho, v0).
     N : int, optional
-        FFT grid size (default 4096).
+        FFT grid size (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -247,6 +251,7 @@ def price_slice_with_heston_and_greeks(
         Input slice augmented with Theo_Price, Delta, Gamma, Vega,
         Theo_IV, IV_Diff, and Abs_IV_Diff columns.
     """
+    validate_market_fft_config(options_slice, N, alpha, eta)
     kappa_v, theta_v, xi_v, rho, v0 = map(float, params)
 
     df = options_slice.copy()
@@ -586,10 +591,10 @@ def update_pnl_from_previous_row(state_df, options_prev, options_curr, t_idx, pr
 
 def run_vol_arb_strategy(
     options_market_df,
-    calibration_N=1024,
-    pricing_N=4096,
-    alpha=1.5,
-    eta=0.25,
+    calibration_N=None,
+    pricing_N=DEFAULT_FFT_N,
+    alpha=DEFAULT_FFT_ALPHA,
+    eta=DEFAULT_FFT_ETA,
     n_each_side=3,
     dt=1/252,
     exit_days_before_expiry=10,
@@ -608,10 +613,11 @@ def run_vol_arb_strategy(
     ----------
     options_market_df : pd.DataFrame
         Must contain Market_IV and all standard option columns.
-    calibration_N : int, optional
-        FFT grid size used during calibration (default 1024).
+    calibration_N : int or None, optional
+        Legacy alias: if provided, must equal pricing_N. By default calibration
+        uses pricing_N, so fitting and valuation cannot silently diverge.
     pricing_N : int, optional
-        FFT grid size used for theoretical pricing (default 4096).
+        Shared FFT grid size for calibration and valuation (default 16384).
     alpha : float, optional
         Carr-Madan damping parameter (default 1.5).
     eta : float, optional
@@ -630,6 +636,10 @@ def run_vol_arb_strategy(
     initial_gross_exposure : float
         Gross notional exposure at inception.
     """
+    if calibration_N is not None and calibration_N != pricing_N:
+        raise ValueError("calibration_N must equal pricing_N; use one FFT configuration.")
+    validate_market_fft_config(options_market_df, pricing_N, alpha, eta)
+
     df = add_option_id_column(options_market_df).copy()
 
     if "Market_IV" not in df.columns:
@@ -667,13 +677,19 @@ def run_vol_arb_strategy(
         S_t = float(full_slice["S_t"].iloc[0])
 
         # 1) Calibration
-        trader_params, _, _, _ = CM99_calibration_market(
-            universe_df,
-            S0=S_t,
-            N=calibration_N,
-            alpha=alpha,
-            eta=eta,
-        )
+        try:
+            trader_params, _, _, _ = CM99_calibration_market(
+                universe_df,
+                S0=S_t,
+                N=pricing_N,
+                alpha=alpha,
+                eta=eta,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Calibration at time index {t_idx} "
+                f"({T_t / dt:.1f} trading days to expiry): {exc}"
+            ) from exc
         write_model_params(state_df, t_idx, trader_params)
 
         # 2) Theoretical pricing, Greeks, and implied volatility

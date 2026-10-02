@@ -26,7 +26,12 @@ from src.vol_arb import (  # noqa: E402
     select_otm_universe,
     select_target_contract,
 )
-from src.calc import CM99_calibration_market  # noqa: E402
+from src.calc import (  # noqa: E402
+    CM99_calibration_market,
+    DEFAULT_FFT_N,
+    DEFAULT_FFT_ALPHA,
+    DEFAULT_FFT_ETA,
+)
 
 
 DEFAULTS = {
@@ -42,10 +47,9 @@ DEFAULTS = {
     "sigmaj": 0.135,
     "noise_scale": 0.005,
     "exit_days_before_expiry": 10,
-    "calibration_N": 1024,
-    "pricing_N": 4096,
-    "alpha": 1.5,
-    "eta": 0.25,
+    "pricing_N": DEFAULT_FFT_N,
+    "alpha": DEFAULT_FFT_ALPHA,
+    "eta": DEFAULT_FFT_ETA,
     "n_each_side": 3,
     "dt": 1 / 252,
     "r": 0.02,
@@ -69,7 +73,6 @@ def run_analysis_cached(
     sigmaj: float,
     noise_scale: float,
     exit_days_before_expiry: int,
-    calibration_N: int,
     pricing_N: int,
     alpha: float,
     eta: float,
@@ -99,7 +102,7 @@ def run_analysis_cached(
         jump_std_m=jump_std,
         r=r,
         dt=dt,
-        N=4096,
+        N=pricing_N,
         alpha=alpha,
         eta=eta,
         use_last_n=use_last_n,
@@ -109,7 +112,6 @@ def run_analysis_cached(
 
     state_df, initial_gross_exposure = run_vol_arb_strategy(
         options_market_df=options_market_df,
-        calibration_N=calibration_N,
         pricing_N=pricing_N,
         alpha=alpha,
         eta=eta,
@@ -130,7 +132,7 @@ def run_analysis_cached(
     trader_params_t0, _, _, _ = CM99_calibration_market(
         universe_t0,
         S0=S_t0,
-        N=calibration_N,
+        N=pricing_N,
         alpha=alpha,
         eta=eta,
     )
@@ -508,7 +510,7 @@ def main():
         st.slider("σⱼ (jump std)", min_value=0.0, max_value=0.30, step=0.005, key="sigmaj", format="%.3f", disabled=not st.session_state["jump_on"])
         st.subheader("Strategy Window")
         st.slider("Time to expiry (trading days)", min_value=20, max_value=60, step=1, key="use_last_n")
-        st.caption("CAUTION: Analysis on a 60-day window takes up to ~11 minutes.")
+        st.caption("Analysis time increases with the selected window length.")
         st.caption("It is recommended to clone the repository and run locally for faster execution.")
         st.button("Reset to defaults", use_container_width=True, on_click=reset_defaults)
         run_clicked = st.button("Run analysis", type="primary", use_container_width=True)
@@ -532,10 +534,9 @@ def main():
                 sigmaj=st.session_state["sigmaj"],
                 noise_scale=st.session_state["noise_scale"],
                 exit_days_before_expiry=st.session_state["exit_days_before_expiry"],
-                calibration_N=st.session_state["calibration_N"],
-                pricing_N=st.session_state["pricing_N"],
-                alpha=st.session_state["alpha"],
-                eta=st.session_state["eta"],
+                pricing_N=DEFAULTS["pricing_N"],
+                alpha=DEFAULTS["alpha"],
+                eta=DEFAULTS["eta"],
                 n_each_side=st.session_state["n_each_side"],
                 dt=st.session_state["dt"],
                 r=st.session_state["r"],
