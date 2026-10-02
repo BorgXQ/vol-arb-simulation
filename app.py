@@ -27,6 +27,7 @@ from src.vol_arb import (  # noqa: E402
     select_otm_universe,
     select_target_contract,
 )
+from src.metrics import compute_performance_metrics  # noqa: E402
 from src.calc import (  # noqa: E402
     CM99_calibration_market,
     DEFAULT_FFT_N,
@@ -128,6 +129,7 @@ def run_analysis_cached(
     )
 
     reported_state = strategy_reporting_window(state_df)
+    # Cache full-precision P&L; round only when displaying the reduced table.
     state_df_reduced = strip_state_df(reported_state)
 
     # Build t=0 diagnostics for row 2.
@@ -308,39 +310,10 @@ def _format_metric(val: float) -> str:
     return "N/A" if pd.isna(val) or np.isinf(val) else f"{val:.3f}"
 
 
-def compute_return_metrics(df: pd.DataFrame, initial_gross_exposure: float, periods_per_year: int = 252):
-    capital = float(initial_gross_exposure)
-    returns = pd.to_numeric(df["pnl_incremental"], errors="coerce").fillna(0.0) / capital
-    cumulative_returns = returns.cumsum()
-
-    mean_ret = returns.mean()
-    std_ret = returns.std(ddof=1)
-    downside_std = returns[returns < 0].std(ddof=1)
-
-    sharpe = np.nan if std_ret <= 0 or pd.isna(std_ret) else np.sqrt(periods_per_year) * mean_ret / std_ret
-    sortino = np.nan if pd.isna(downside_std) or downside_std <= 0 else np.sqrt(periods_per_year) * mean_ret / downside_std
-
-    running_max = cumulative_returns.cummax()
-    drawdown = cumulative_returns - running_max
-    max_drawdown = drawdown.min()
-
-    annualized_return = mean_ret * periods_per_year
-    calmar = np.nan if pd.isna(max_drawdown) or max_drawdown >= 0 else annualized_return / abs(max_drawdown)
-
-    return {
-        "returns": returns,
-        "cumulative_returns": cumulative_returns,
-        "sharpe": sharpe,
-        "sortino": sortino,
-        "max_drawdown": max_drawdown,
-        "calmar": calmar,
-    }
-
-
 def make_strategy_dashboard_figure(state_df_reduced: pd.DataFrame, initial_gross_exposure: float):
     df = state_df_reduced.copy().reset_index(drop=True)
-    metrics = compute_return_metrics(df, initial_gross_exposure)
-    returns_cum = metrics["cumulative_returns"]
+    metrics = compute_performance_metrics(df, initial_gross_exposure)
+    returns_cum = metrics["cumulative_normalized_pnl"]
 
     target_option_id = df["target_option_id"].dropna().iloc[0] if df["target_option_id"].notna().any() else None
     target_weight_col = f"w_{target_option_id}" if target_option_id is not None else None
@@ -356,7 +329,7 @@ def make_strategy_dashboard_figure(state_df_reduced: pd.DataFrame, initial_gross
             "Hedge Weights",
             "Target Market vs Theoretical Price",
             "Target Market vs Theoretical IV",
-            "Cumulative Return",
+            "Cumulative P&L / Initial Gross Exposure",
         ),
         horizontal_spacing=0.10,
         vertical_spacing=0.18,
@@ -462,14 +435,14 @@ def make_strategy_dashboard_figure(state_df_reduced: pd.DataFrame, initial_gross
         col=1,
     )
 
-    # Cumulative return panel.
+    # Exposure-normalized cumulative P&L panel.
     fig.add_trace(
         go.Scatter(
             x=df.index,
             y=returns_cum,
             mode="lines",
-            name="Cum Ret",
-            hovertemplate="t=%{x}<br>Cumulative Return: %{y:.6%}<extra></extra>",
+            name="Cumulative normalized P&L",
+            hovertemplate="t=%{x}<br>Cumulative P&L / Initial Gross Exposure: %{y:.6%}<extra></extra>",
         ),
         row=2,
         col=2,
@@ -490,7 +463,7 @@ def make_strategy_dashboard_figure(state_df_reduced: pd.DataFrame, initial_gross
     fig.update_yaxes(title_text="Weight", row=1, col=1)
     fig.update_yaxes(title_text="Price", row=1, col=2)
     fig.update_yaxes(title_text="Implied Volatility", row=2, col=1)
-    fig.update_yaxes(title_text="Cumulative Return", row=2, col=2, tickformat=".1%")
+    fig.update_yaxes(title_text="Cumulative P&L / Initial Gross Exposure", row=2, col=2, tickformat=".1%")
     return fig, metrics
 
 
@@ -603,11 +576,15 @@ def main():
     strategy_fig, strategy_metrics = make_strategy_dashboard_figure(state_df_reduced, initial_gross_exposure)
     st.plotly_chart(strategy_fig, use_container_width=True)
 
+    st.caption("Performance is P&L after financing divided by initial gross exposure, not return on invested capital. "
+               "Statistics exclude inception and include the exit day. Sharpe uses a zero benchmark; Sortino uses "
+               "a zero target. Drawdown is a positive loss magnitude relative to initial exposure. "
+               "Annualized P&L / max drawdown uses an arithmetic annualization, not conventional Calmar.")
     metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-    metric_col1.metric("Sharpe Ratio", _format_metric(strategy_metrics["sharpe"]))
-    metric_col2.metric("Max Drawdown", "N/A" if pd.isna(strategy_metrics["max_drawdown"]) else f"{strategy_metrics['max_drawdown']:.3%}")
-    metric_col3.metric("Sortino Ratio", _format_metric(strategy_metrics["sortino"]))
-    metric_col4.metric("Calmar Ratio", _format_metric(strategy_metrics["calmar"]))
+    metric_col1.metric("Sharpe (zero benchmark)", _format_metric(strategy_metrics["sharpe"]))
+    metric_col2.metric("Max drawdown / initial exposure", "N/A" if pd.isna(strategy_metrics["max_drawdown"]) else f"{strategy_metrics['max_drawdown']:.3%}")
+    metric_col3.metric("Sortino (zero target)", _format_metric(strategy_metrics["sortino"]))
+    metric_col4.metric("Annualized P&L / max drawdown", _format_metric(strategy_metrics["annualized_pnl_to_drawdown"]))
 
     with st.expander(f"Show t = {window_start} calibration-universe data"):
         display_cols = [
@@ -626,7 +603,7 @@ def main():
         st.dataframe(result["cash_account"], use_container_width=True)
 
     with st.expander("Show reduced state dataframe"):
-        st.dataframe(state_df_reduced, use_container_width=True)
+        st.dataframe(state_df_reduced.round(6), use_container_width=True)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.stats import norm
 from scipy.optimize import brentq
+from src.metrics import compute_performance_metrics
 from src.calc import (
     DEFAULT_FFT_N,
     DEFAULT_FFT_ALPHA,
@@ -515,7 +516,7 @@ def strip_state_df(state_df):
     Reduce the full strategy state DataFrame to a compact diagnostic view.
 
     Extracts target-option IV/price columns, selects core columns and weight
-    columns, and rounds all numeric values to 6 decimal places.
+    columns, preserving full precision for downstream calculations.
 
     Parameters
     ----------
@@ -587,16 +588,6 @@ def strip_state_df(state_df):
         axis=1
     ).copy()
 
-    # Round numeric columns to 6 decimal places
-    exclude_cols = {"target_option_id", "target_position"}
-
-    numeric_cols = [
-        col for col in reduced_df.columns
-        if col not in exclude_cols and pd.api.types.is_numeric_dtype(reduced_df[col])
-    ]
-
-    reduced_df[numeric_cols] = reduced_df[numeric_cols].round(6)
-
     return reduced_df
 
 
@@ -609,21 +600,21 @@ def plot_strategy_dashboard_plotly(state_df_reduced, initial_gross_exposure, per
     1. Hedge weights over time.
     2. Target market price vs theoretical price.
     3. Target market IV vs theoretical IV.
-    4. Cumulative returns with Sharpe, Sortino, Max Drawdown, and Calmar.
+    4. Exposure-normalized P&L, zero-benchmark risk ratios, and normalized drawdown.
 
     Parameters
     ----------
     state_df_reduced : pd.DataFrame
         Compact state DataFrame as returned by strip_state_df.
     initial_gross_exposure : float
-        Gross notional at inception; used to normalise PnL into returns.
+        Gross exposure at inception; used to normalize P&L, not deposited capital.
     periods_per_year : int, optional
         Annualisation factor (default 252).
 
     Notes
     -----
-    Risk metrics are computed from pnl_incremental. If true portfolio returns
-    are available, substitute them for more standard ratio calculations.
+    Both dashboard implementations share src.metrics. Calculations exclude the
+    zero-P&L inception row; cumulative plots retain it as the initial baseline.
     """
 
     df = state_df_reduced.copy().reset_index(drop=True)
@@ -637,39 +628,21 @@ def plot_strategy_dashboard_plotly(state_df_reduced, initial_gross_exposure, per
         if col.startswith("w_") and col != "w_underlying" and col != target_weight_col
     ]
 
-    # Risk metrics from pnl_incremental
-    capital = initial_gross_exposure
+    metrics = compute_performance_metrics(df, initial_gross_exposure, periods_per_year)
+    returns_cum = metrics["cumulative_normalized_pnl"]
 
-    returns = pd.to_numeric(df["pnl_incremental"], errors="coerce").fillna(0.0) / capital
-    returns_cum = returns.cumsum()
-
-    mean_ret = returns.mean()
-    std_ret = returns.std(ddof=1)
-    downside_std = returns[returns < 0].std(ddof=1)
-
-    sharpe = np.nan
-    if std_ret > 0:
-        sharpe = np.sqrt(periods_per_year) * mean_ret / std_ret
-
-    sortino = np.nan
-    if pd.notna(downside_std) and downside_std > 0:
-        sortino = np.sqrt(periods_per_year) * mean_ret / downside_std
-
-    running_max = returns_cum.cummax()
-    drawdown = returns_cum - running_max
-    max_drawdown = drawdown.min()
-
-    annualized_return = mean_ret * periods_per_year
-
-    calmar = np.nan
-    if max_drawdown < 0:
-        calmar = annualized_return / abs(max_drawdown)
+    def formatted(value, percent=False):
+        if not np.isfinite(value):
+            return "N/A"
+        return f"{value:.3%}" if percent else f"{value:.3f}"
 
     metrics_text = (
-        f"Sharpe: {sharpe:.3f}<br>"
-        f"Sortino: {sortino:.3f}<br>"
-        f"Max Drawdown: {max_drawdown:.6f}<br>"
-        f"Calmar: {calmar:.3f}"
+        f"Sharpe (zero benchmark): {formatted(metrics['sharpe'])}<br>"
+        f"Sortino (zero target): {formatted(metrics['sortino'])}<br>"
+        f"Max drawdown / initial exposure: {formatted(metrics['max_drawdown'], True)}<br>"
+        f"Annualized P&L / max drawdown: {formatted(metrics['annualized_pnl_to_drawdown'])}<br>"
+        "Statistics exclude inception; P&L includes financing.<br>"
+        "Exposure-normalized P&L, not return on invested capital."
     )
 
     # Build figure
@@ -682,7 +655,7 @@ def plot_strategy_dashboard_plotly(state_df_reduced, initial_gross_exposure, per
             "Hedge Weights",
             "Target Market Price vs Theoretical Price",
             "Target Market IV vs Theoretical IV",
-            "Cumulative Returns"
+            "Cumulative P&L / Initial Gross Exposure"
         )
     )
 
@@ -826,9 +799,9 @@ def plot_strategy_dashboard_plotly(state_df_reduced, initial_gross_exposure, per
             x=df.index,
             y=returns_cum,
             mode="lines",
-            name="Cumulative Returns",
+            name="Cumulative P&L / Initial Gross Exposure",
             line=dict(width=3),
-            hovertemplate="Cumulative Returns: %{y:.6f}<br>t=%{x}<extra></extra>"
+            hovertemplate="Cumulative P&L / Initial Gross Exposure: %{y:.6%}<br>t=%{x}<extra></extra>"
         ),
         row=4,
         col=1
@@ -861,7 +834,7 @@ def plot_strategy_dashboard_plotly(state_df_reduced, initial_gross_exposure, per
     fig.update_yaxes(title_text="Weight", row=1, col=1)
     fig.update_yaxes(title_text="Price", row=2, col=1)
     fig.update_yaxes(title_text="Implied Volatility", row=3, col=1)
-    fig.update_yaxes(title_text="Cumulative Returns", row=4, col=1)
+    fig.update_yaxes(title_text="Cumulative P&L / Initial Gross Exposure", row=4, col=1, tickformat=".1%")
 
     fig.update_xaxes(title_text="Time Index", row=4, col=1)
 
