@@ -27,7 +27,7 @@ class StrikeUniverseTests(unittest.TestCase):
                 jump_std_m=0.04,
                 N=4096,
                 use_last_n=len(spots) if use_last_n is None else use_last_n,
-                noise_scale=0.005,
+                noise_scale=0.0,
             )
         finally:
             np.random.set_state(random_state)

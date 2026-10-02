@@ -45,7 +45,7 @@ DEFAULTS = {
     "lambdaj": 1.62,
     "muj": -0.165,
     "sigmaj": 0.135,
-    "noise_scale": 0.005,
+    "noise_scale": 0.0,
     "exit_days_before_expiry": 10,
     "pricing_N": DEFAULT_FFT_N,
     "alpha": DEFAULT_FFT_ALPHA,
@@ -80,6 +80,9 @@ def run_analysis_cached(
     dt: float,
     r: float,
 ):
+    if noise_scale != 0:
+        raise ValueError("Quote noise is disabled for the baseline; noise_scale must be 0.")
+
     jump_intensity = lambdaj if jump_on else 0.0
     jump_mean = muj if jump_on else 0.0
     jump_std = sigmaj if jump_on else 0.0
@@ -503,7 +506,7 @@ def main():
         st.slider("θ (long-term variance)", min_value=0.01, max_value=0.15, step=0.001, key="theta", format="%.3f")
         st.slider("ξ (volatility of volatility)", min_value=0.05, max_value=0.80, step=0.005, key="xi", format="%.3f")
         st.slider("ρ (correlation)", min_value=-0.95, max_value=0.0, step=0.01, key="rho")
-        st.slider("σ_ε (market price noise)", min_value=0.0, max_value=0.03, step=0.001, key="noise_scale", format="%.3f")
+        st.caption("Quote noise is disabled for the baseline simulation.")
         st.toggle("Jump diffusion", key="jump_on")
         st.slider("λ (jump intensity)", min_value=0.0, max_value=3.0, step=0.01, key="lambdaj", disabled=not st.session_state["jump_on"])
         st.slider("μⱼ (jump mean)", min_value=-0.30, max_value=0.0, step=0.005, key="muj", format="%.3f", disabled=not st.session_state["jump_on"])
@@ -532,7 +535,7 @@ def main():
                 lambdaj=st.session_state["lambdaj"],
                 muj=st.session_state["muj"],
                 sigmaj=st.session_state["sigmaj"],
-                noise_scale=st.session_state["noise_scale"],
+                noise_scale=DEFAULTS["noise_scale"],
                 exit_days_before_expiry=st.session_state["exit_days_before_expiry"],
                 pricing_N=DEFAULTS["pricing_N"],
                 alpha=DEFAULTS["alpha"],

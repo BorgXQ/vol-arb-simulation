@@ -366,6 +366,9 @@ def put_from_call_parity(call_prices, S0, strikes, r, T):
     """
     Derive put prices from call prices via put-call parity.
 
+    This is an unclipped identity. Invalid call prices may imply negative puts;
+    validate market calls with european_market_quotes rather than hiding them.
+
     Parameters
     ----------
     call_prices : ndarray
@@ -378,7 +381,50 @@ def put_from_call_parity(call_prices, S0, strikes, r, T):
     -------
     ndarray
     """
-    return np.maximum(call_prices - S0 + strikes * np.exp(-r * T), 0.0)
+    # Keep this identity exact: independently clipping puts breaks parity.
+    return np.asarray(call_prices) - S0 + np.asarray(strikes) * np.exp(-r * T)
+
+
+def european_market_quotes(call_prices, S0, strikes, r, T):
+    """Validate a call slice and derive consistent, non-dividend European puts.
+
+    Correct only bound violations within 5e-6 * spot / 100 dollars, matching
+    the pricing regression tolerance. Reject material bound, vertical-spread,
+    or butterfly violations instead of masking a pricing failure. Strikes must
+    be strictly increasing. At expiry, require and return exact payoffs.
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    calls = np.asarray(call_prices, dtype=float)
+    if (
+        strikes.ndim != 1 or strikes.size == 0 or calls.shape != strikes.shape
+        or not np.all(np.isfinite(strikes)) or np.any(strikes <= 0)
+        or not np.all(np.isfinite(calls)) or np.any(np.diff(strikes) <= 0)
+        or not np.all(np.isfinite([S0, r, T])) or S0 <= 0 or T < 0
+    ):
+        raise ValueError("European quotes require finite prices, positive spot/strikes, increasing strikes, and T >= 0.")
+
+    tolerance = 5e-6 * S0 / 100.0
+    discount = np.exp(-r * T)
+    discounted_strikes = strikes * discount
+    lower = np.maximum(S0 - discounted_strikes, 0.0)
+    upper = lower if T == 0 else S0
+    if np.any(calls < lower - tolerance) or np.any(calls > upper + tolerance):
+        raise ValueError("European call prices violate discounted-strike bounds beyond numerical tolerance.")
+    calls = np.clip(calls, lower, upper)
+
+    widths = np.diff(strikes)
+    spreads = np.diff(calls)
+    if np.any(spreads > 2 * tolerance) or np.any(spreads < -discount * widths - 2 * tolerance):
+        raise ValueError("European call prices violate vertical-spread bounds beyond numerical tolerance.")
+    slopes = spreads / widths
+    slope_tolerance = 2 * tolerance * (1 / widths[:-1] + 1 / widths[1:])
+    if np.any(np.diff(slopes) < -slope_tolerance):
+        raise ValueError("European call prices violate convexity beyond numerical tolerance.")
+
+    if T == 0:
+        return calls, np.maximum(strikes - S0, 0.0)
+    puts = put_from_call_parity(calls, S0, strikes, r, T)
+    return calls, puts
 
 
 def _heston_price_residuals(p0, options, S0, N, alpha, eta):

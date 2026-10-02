@@ -9,9 +9,9 @@ from src.calc import (
     DEFAULT_FFT_ALPHA,
     DEFAULT_FFT_ETA,
     validate_fft_config,
+    european_market_quotes,
     CM99_call_price_grid_jd_fft,
     interpolate_call_prices,
-    put_from_call_parity
 )
 
 
@@ -206,7 +206,7 @@ def generate_market_option_prices_across_time(
     alpha=DEFAULT_FFT_ALPHA,
     eta=DEFAULT_FFT_ETA,
     use_last_n=60,
-    noise_scale=0.005,
+    noise_scale=0.0,
 ):
     """
     Generate synthetic market call and put prices across time for a fixed
@@ -246,7 +246,8 @@ def generate_market_option_prices_across_time(
     use_last_n : int, optional
         Number of trailing timesteps to use (default 60).
     noise_scale : float, optional
-        Proportional noise scale applied to prices (default 0.005).
+        Must be zero (default). Independent quote noise is disabled because it
+        breaks put-call parity and cross-strike consistency.
 
     Returns
     -------
@@ -255,6 +256,8 @@ def generate_market_option_prices_across_time(
     """
 
     fft_config = validate_fft_config(N, alpha, eta)
+    if not np.isfinite(noise_scale) or noise_scale != 0:
+        raise ValueError("Quote noise is disabled for the consistent baseline; noise_scale must be 0.")
 
     # Window selection
     S_window = np.asarray(S_path[-use_last_n:], dtype=float)
@@ -279,53 +282,26 @@ def generate_market_option_prices_across_time(
 
         # Time to expiry measured from current time to final time in this window
         tau_steps = (n_steps - 1) - t_idx
-        T_t = max(tau_steps * dt, 1e-10)
+        T_t = tau_steps * dt
 
         # Use current variance state; scaled to reflect market mismatch
         v_t_market = max(v_window[t_idx] * 1.05, 1e-10)
 
-        # Price all call strikes at once
-        K_grid, call_grid = CM99_call_price_grid_jd_fft(
-            S0=S_t,
-            T=T_t,
-            r=r,
-            v0=v_t_market,
-            kappa_v=kappa_m,
-            theta_v=theta_m,
-            xi_v=xi_m,
-            rho=rho_m,
-            lambda_j=jump_intensity_m,
-            mu_j=jump_mean_m,
-            sigma_j=jump_std_m,
-            N=N,
-            alpha=alpha,
-            eta=eta,
-        )
+        if T_t == 0:
+            call_prices = np.maximum(S_t - strikes, 0.0)
+        else:
+            K_grid, call_grid = CM99_call_price_grid_jd_fft(
+                S0=S_t, T=T_t, r=r, v0=v_t_market,
+                kappa_v=kappa_m, theta_v=theta_m, xi_v=xi_m, rho=rho_m,
+                lambda_j=jump_intensity_m, mu_j=jump_mean_m, sigma_j=jump_std_m,
+                N=N, alpha=alpha, eta=eta,
+            )
+            call_prices = interpolate_call_prices(strikes, K_grid, call_grid)
 
-        call_prices = interpolate_call_prices(strikes, K_grid, call_grid)
-        put_prices = put_from_call_parity(
-            call_prices=call_prices,
-            S0=S_t,
-            strikes=strikes,
-            r=r,
-            T=T_t,
-        )
-
-        # Add realistic market noise
-        noise_scale = noise_scale
-
-        call_noise = np.random.normal(0, noise_scale, size=len(call_prices))
-        put_noise  = np.random.normal(0, noise_scale, size=len(put_prices))
-
-        call_prices = call_prices * (1 + call_noise)
-        put_prices  = put_prices  * (1 + put_noise)
-
-        # Enforce no-arbitrage bounds
-        intrinsic_call = np.maximum(S_t - strikes, 0.0)
-        intrinsic_put  = np.maximum(strikes - S_t, 0.0)
-
-        call_prices = np.maximum(call_prices, intrinsic_call)
-        put_prices  = np.maximum(put_prices, intrinsic_put)
+        try:
+            call_prices, put_prices = european_market_quotes(call_prices, S_t, strikes, r, T_t)
+        except ValueError as exc:
+            raise ValueError(f"Invalid market quotes at time index {t_idx}: {exc}") from exc
 
         # Store calls
         for K, price in zip(strikes, call_prices):
